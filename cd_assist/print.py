@@ -19,6 +19,19 @@ def print_no_query():
 def print_exception(error):
     print(f"{COMPUTER}{CONFUSED} Error encountered: {error}")
 
+def print_interpretation(interpretation):
+    print(f"{COMPUTER}{GAMBA} I have interpreted!")
+    print(f"Intent: {interpretation.intent.value}")
+    print(f"Target: {interpretation.target or 'Not specified'}")
+    print("Search terms:")
+
+    for term in interpretation.search_terms:
+        print(f"- {term}")
+
 def print_agent_response(response):
     print(f"{COMPUTER}{EXCITE} I have a response!")
     print(response)
+
+
+def print_idk():
+    print(f"{COMPUTER}{CONFUSED}")

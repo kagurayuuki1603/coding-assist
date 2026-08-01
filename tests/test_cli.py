@@ -1,9 +1,23 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from cd_assist.agent import ModelResponseError
-from cd_assist.cli import handle_ask_command, handle_explain_command, run_app
-from cd_assist.tools import FileParseError
+from cd_assist.cli import (
+    handle_ask_command,
+    handle_explain_command,
+    handle_find_bug_command,
+    handle_interpret_command,
+    handle_select_tool_command,
+    run_app,
+)
+from cd_assist.errors import FileParseError, ModelResponseError
+from cd_assist.models import (
+    BugAnalysis,
+    BugFinding,
+    READ_FILE,
+    RetrievalRequest,
+    TaskIntent,
+    TaskInterpretation,
+)
 
 
 class HandleExplainCommandTests(unittest.TestCase):
@@ -93,6 +107,49 @@ class HandleAskCommandTests(unittest.TestCase):
         print_agent_response.assert_not_called()
 
 
+class HandleInterpretCommandTests(unittest.TestCase):
+    @patch("cd_assist.cli.print_interpretation")
+    def test_interprets_and_prints_task(self, print_interpretation):
+        interpretation = TaskInterpretation(
+            intent=TaskIntent.FIND_BUGS,
+            target="UserService.java",
+            search_terms=["UserService", "validation"],
+        )
+        agent = Mock()
+        agent.interpret_task.return_value = interpretation
+
+        handle_interpret_command(
+            "interpret Find validation bugs in UserService.java",
+            agent,
+        )
+
+        agent.interpret_task.assert_called_once_with(
+            "Find validation bugs in UserService.java"
+        )
+        print_interpretation.assert_called_once_with(interpretation)
+
+    @patch("cd_assist.cli.print_interpretation")
+    @patch("cd_assist.cli.print_exception")
+    def test_reports_model_error(self, print_exception, print_interpretation):
+        agent = Mock()
+        error = ModelResponseError("Could not generate a model response")
+        agent.interpret_task.side_effect = error
+
+        handle_interpret_command("interpret Explain UserService.java", agent)
+
+        print_exception.assert_called_once_with(error)
+        print_interpretation.assert_not_called()
+
+    @patch("cd_assist.cli.print_no_query")
+    def test_reports_missing_query(self, print_no_query):
+        agent = Mock()
+
+        handle_interpret_command("interpret", agent)
+
+        print_no_query.assert_called_once_with()
+        agent.interpret_task.assert_not_called()
+
+
 class RunAppTests(unittest.TestCase):
     @patch("cd_assist.cli.print_goodbye")
     @patch("cd_assist.cli.print_intro")
@@ -109,12 +166,180 @@ class RunAppTests(unittest.TestCase):
     ):
         agent = Mock()
 
-        run_app(object(), "workspace", agent)
+        run_app("workspace", agent)
 
         handle_ask_command.assert_called_once_with("ask validation", agent, "workspace")
         handle_explain_command.assert_called_once_with("explain Example.java", agent)
         print_goodbye.assert_called_once_with()
 
+    @patch("cd_assist.cli.print_goodbye")
+    @patch("cd_assist.cli.print_intro")
+    @patch("cd_assist.cli.handle_interpret_command")
+    @patch(
+        "builtins.input",
+        side_effect=["interpret Find bugs in UserService.java", "exit"],
+    )
+    def test_routes_interpret_command(
+        self,
+        input_mock,
+        handle_interpret_command,
+        print_intro,
+        print_goodbye,
+    ):
+        agent = Mock()
+
+        run_app("workspace", agent)
+
+        handle_interpret_command.assert_called_once_with(
+            "interpret Find bugs in UserService.java",
+            agent,
+        )
+        print_goodbye.assert_called_once_with()
+
+    @patch("cd_assist.cli.print_goodbye")
+    @patch("cd_assist.cli.print_intro")
+    @patch("cd_assist.cli.handle_select_tool_command")
+    @patch(
+        "builtins.input",
+        side_effect=["select Find bugs in UserService.java", "exit"],
+    )
+    def test_routes_select_command(
+        self,
+        input_mock,
+        handle_select_tool_command,
+        print_intro,
+        print_goodbye,
+    ):
+        agent = Mock()
+
+        run_app("workspace", agent)
+
+        handle_select_tool_command.assert_called_once_with(
+            "select Find bugs in UserService.java",
+            agent,
+        )
+        print_goodbye.assert_called_once_with()
+
+    @patch("cd_assist.cli.print_goodbye")
+    @patch("cd_assist.cli.print_intro")
+    @patch("cd_assist.cli.handle_find_bug_command")
+    @patch(
+        "builtins.input",
+        side_effect=["find bugs in ExampleService.java", "exit"],
+    )
+    def test_routes_find_bugs_command(
+        self,
+        input_mock,
+        handle_find_bug_command,
+        print_intro,
+        print_goodbye,
+    ):
+        agent = Mock()
+
+        run_app("workspace", agent)
+
+        handle_find_bug_command.assert_called_once_with(
+            "find bugs in ExampleService.java",
+            agent,
+        )
+        print_goodbye.assert_called_once_with()
+
+
+class HandleSelectToolCommandTests(unittest.TestCase):
+    @patch("builtins.print")
+    def test_interprets_selects_and_prints_request(self, print_mock):
+        interpretation = TaskInterpretation(
+            intent=TaskIntent.FIND_BUGS,
+            target="UserService.java",
+            search_terms=["UserService"],
+        )
+        request = RetrievalRequest(
+            tool=READ_FILE,
+            path="UserService.java",
+            query=None,
+        )
+        agent = Mock()
+        agent.interpret_task.return_value = interpretation
+        agent.retrieve_tool.return_value = request
+
+        handle_select_tool_command("select Find bugs in UserService.java", agent)
+
+        agent.interpret_task.assert_called_once_with(
+            "Find bugs in UserService.java"
+        )
+        agent.retrieve_tool.assert_called_once_with(interpretation)
+        print_mock.assert_called_once_with(request)
+
+    @patch("cd_assist.cli.print_no_query")
+    def test_reports_missing_query(self, print_no_query):
+        agent = Mock()
+
+        handle_select_tool_command("select", agent)
+
+        print_no_query.assert_called_once_with()
+        agent.interpret_task.assert_not_called()
+        agent.retrieve_tool.assert_not_called()
+
+    @patch("builtins.print")
+    @patch("cd_assist.cli.print_exception")
+    def test_reports_model_error(self, print_exception, print_mock):
+        agent = Mock()
+        error = ModelResponseError("Could not generate a model response")
+        agent.retrieve_tool.side_effect = error
+
+        handle_select_tool_command("select Find bugs", agent)
+
+        print_exception.assert_called_once_with(error)
+        print_mock.assert_not_called()
+
+
+class HandleFindBugCommandTests(unittest.TestCase):
+    @patch("cd_assist.cli.print_agent_response")
+    def test_finds_bugs_and_prints_structured_analysis(self, print_agent_response):
+        analysis = BugAnalysis(
+            findings=[
+                BugFinding(
+                    path="ExampleService.java",
+                    start_line=12,
+                    reasoning="The result can contain a null component.",
+                    impact="Users can receive an invalid display name.",
+                    confidence="high",
+                    evidence_indices=[0],
+                )
+            ],
+            insufficient_evidence_reason=None,
+        )
+        agent = Mock()
+        agent.find_bugs.return_value = analysis
+
+        handle_find_bug_command(
+            "find bugs in ExampleService.java",
+            agent,
+        )
+
+        agent.find_bugs.assert_called_once_with("in ExampleService.java")
+        print_agent_response.assert_called_once_with(analysis.to_console_string())
+
+    @patch("cd_assist.cli.print_no_query")
+    def test_reports_missing_bug_query(self, print_no_query):
+        agent = Mock()
+
+        handle_find_bug_command("find bugs", agent)
+
+        print_no_query.assert_called_once_with()
+        agent.find_bugs.assert_not_called()
+
+    @patch("cd_assist.cli.print_agent_response")
+    @patch("cd_assist.cli.print_exception")
+    def test_reports_bug_analysis_error(self, print_exception, print_agent_response):
+        agent = Mock()
+        error = ModelResponseError("Could not analyze bugs")
+        agent.find_bugs.side_effect = error
+
+        handle_find_bug_command("find bugs in ExampleService.java", agent)
+
+        print_exception.assert_called_once_with(error)
+        print_agent_response.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,13 +42,27 @@ This project deliberately focuses on reliability and security:
 
 ## Current Status
 
-v0.2 is implemented. The CLI can safely read a known Java file or search a
-configured workspace and build compact repository context for an answer.
+v0.3 is implemented and smoke-tested through v0.3.6. The CLI supports natural-language task
+interpretation, model-directed repository retrieval, bounded multi-step
+retrieval, normalized evidence-set construction, and structured evidence-based
+bug reports. Seeded positive, ambiguous, style-only, and missing-evidence cases
+provide repeatable bug-finding evaluation. Work proceeds next to v0.4 test
+generation as proposed changes.
 
 Current capabilities:
 
 - interactive `explain <path>` command
 - interactive `ask <literal-search-query>` command
+- natural-language task interpretation
+- model selection between `read_file` and `search_files`
+- bounded multi-step retrieval with explicit stop reasons
+- repeated-request detection
+- attributed and deduplicated evidence sets
+- bounded evidence context for downstream analysis
+- structured bug findings with location, reasoning, impact, and confidence
+- application validation of supporting evidence references
+- explicit insufficient-evidence results
+- rejection of style-only observations as defects
 - workspace-boundary and path-traversal protection
 - case-insensitive Java-extension validation
 - bounded UTF-8 file reading
@@ -58,12 +72,13 @@ Current capabilities:
 - friendly search-input and repository file errors
 - streamed model responses
 - friendly file and model error reporting
-- unit tests for reading, searching, context construction, agent prompts, and CLI routing
+- unit and integration-style tests for reading, searching, retrieval loops,
+  evidence construction, agent prompts, and CLI routing
 
-In v0.2, command routing is explicit: `explain` reads a known file and `ask`
-searches using the literal text after the command. Natural-language query
-interpretation and model-directed selection between repository tools are
-planned for v0.3.
+The earlier `explain` and `ask` commands remain available. The v0.3 retrieval
+path can interpret a natural-language request, select an approved read tool,
+gather additional repository evidence when needed, and build a compact evidence
+set while keeping repository content distinct from model inference.
 
 The intended tool surface is:
 
@@ -209,10 +224,9 @@ inside source files.
 
 ## Next Version
 
-v0.3 adds natural-language repository questions and model-directed retrieval.
-The model will be able to choose between reading a known file and searching the
-repository, gather additional evidence when needed, and report likely bugs with
-source locations, reasoning, impact, and confidence.
+v0.4 begins test generation as proposed repository changes. Its first milestone,
+v0.4.1, discovers the repository's build configuration, test framework,
+existing tests, and testing conventions before proposing new tests.
 
 ### `write_file()`
 

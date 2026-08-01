@@ -104,9 +104,13 @@ Tool behavior must be validated by application code. The model should never be t
 
 ## Current Implementation Status
 
-v0.2 is implemented. The CLI supports explicit commands for reading a known
-Java file and searching the repository with a literal query. Model-directed
-tool selection and natural-language query interpretation are deferred to v0.3.
+v0.3 is implemented and smoke-tested through v0.3.6. The application supports
+natural-language task interpretation, model-directed selection of approved read
+tools, bounded multi-step retrieval, and attributed, deduplicated evidence-set
+construction. It produces structured bug findings with validated evidence
+references and explicit insufficient-evidence outcomes. Seeded fixture cases
+cover concrete defects, ambiguous behavior, style-only observations, and
+missing repository evidence. Test-framework discovery is next in v0.4.1.
 
 This project should start from the existing learning baseline rather than rebuilding earlier introductory pieces. The assistant may reuse patterns for CLI interaction, model calls, structured outputs, logging, fake or real model abstractions, and tests.
 

@@ -3,8 +3,8 @@ from pathlib import Path
 from enum import Enum
 from dataclasses import dataclass
 
-class FileParseError(Exception):
-    pass
+from cd_assist.errors import FileParseError
+
 
 def read_file(workspace: str | Path, requested_path: str, max_char=50_000):
     workspace = Path(workspace).resolve()
@@ -47,6 +47,18 @@ class SearchResult:
     path: str
     match_type: MatchType
     line_snippet: LineSnippet | None = None
+
+    def to_context_str(self) -> str:
+        if self.match_type == MatchType.CONTENT:
+            return (
+                    f"File: {self.path}\n"
+                    f"Line {self.line_snippet.line}: {self.line_snippet.snippet}"
+                )
+        else:
+            return (
+                    f"File: {self.path}\n"
+                    "Path match"
+                )
 
 
 def search_files(workspace: str | Path, query: str, max_results=20, max_snippet_chars=200) -> list[SearchResult]:

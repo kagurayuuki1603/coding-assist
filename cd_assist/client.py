@@ -1,5 +1,5 @@
 from dotenv import load_dotenv
-from openai import OpenAI, OpenAIError
+from openai import OpenAI
 import os
 import sys
 

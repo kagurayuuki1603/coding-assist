@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from cd_assist.errors import FileParseError
 from cd_assist.tools import (
-    FileParseError,
     LineSnippet,
     MatchType,
     SearchResult,
