@@ -10,8 +10,11 @@ from cd_assist.models import (
     RetrievalDecision,
     RetrievalRequest,
     RetrievalState,
+    StopReason,
+    TaskIntent,
     TaskInterpretation,
     EvidenceSet,
+    TestGenerationContext,
 )
 from cd_assist.prompts import (
     ASK_INSTRUCTIONS,
@@ -21,6 +24,7 @@ from cd_assist.prompts import (
     NEXT_RETRIEVAL_INSTRUCTIONS,
     RETRIEVAL_SELECTION_INSTRUCTIONS,
 )
+from cd_assist.test_generation import discover_test_framework
 from cd_assist.tools import read_file
 from cd_assist.retrieval import run_retrieval_loop
 
@@ -33,7 +37,7 @@ def init_agent(workspace, client):
         interpret_intention=interpret_intention,
         select_tool=select_tool,
         decide_next_retrieval=decide_next_retrieval,
-        analyze_bugs=analyze_bugs
+        analyze_bugs=analyze_bugs,
     )
 
 
@@ -194,7 +198,7 @@ class CodingAssistantAgent:
         interpret_intention: Callable[[OpenAI, str], TaskInterpretation],
         select_tool: Callable[[OpenAI, TaskInterpretation], RetrievalRequest],
         decide_next_retrieval: Callable[[OpenAI, TaskInterpretation, str], RetrievalDecision],
-        analyze_bugs: Callable[[OpenAI, EvidenceSet, str], BugAnalysis]
+        analyze_bugs: Callable[[OpenAI, EvidenceSet, str], BugAnalysis],
     ):
         self.workspace = workspace
         self.client = client
@@ -243,6 +247,10 @@ Query: {query}
 
     def gather_retrievals(self, query: str) -> RetrievalState:
         interpretation = self.interpret_task(query)
+
+        return self.gather_retrievals_for_interpretation(interpretation)
+
+    def gather_retrievals_for_interpretation(self, interpretation: TaskInterpretation) -> RetrievalState:
         initial_request = self.retrieve_tool(interpretation)
 
         return run_retrieval_loop(
@@ -268,3 +276,24 @@ Query: {query}
             raise ModelResponseError(f"The model did not return a valid bug analysis: {error}") from error
 
         return analysis
+
+    def gather_test_generation_context(self, query: str) -> TestGenerationContext:
+        interpretation = self.interpret_task(query)
+
+        if interpretation.intent != TaskIntent.GENERATE_TESTS:
+            raise ValueError("Expected a test-generation task")
+
+        state: RetrievalState = self.gather_retrievals_for_interpretation(interpretation)
+
+        if state.stop_reason == StopReason.TOOL_ERROR:
+            raise ModelResponseError(f"Something went wrong with the tool...{state.to_cli_string()}")
+
+        evidence = state.build_evidence_set()
+        discovery = discover_test_framework(self.workspace)
+
+        return TestGenerationContext(
+            request=query,
+            interpretation=interpretation,
+            discovery=discovery,
+            evidence=evidence,
+        )

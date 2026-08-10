@@ -1,4 +1,5 @@
 import unittest
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -14,11 +15,13 @@ from cd_assist.models import (
     RetrievalRequest,
     RetrievalState,
     StopReason,
+    TaskIntent,
     TaskInterpretation,
 )
 from cd_assist.retrieval import (
     build_retrieval_context,
     execute_retrieval,
+    resolve_retrieval_request,
     run_retrieval_loop,
 )
 from cd_assist.tools import (
@@ -518,6 +521,86 @@ class ExecuteRetrievalTests(unittest.TestCase):
         search_files.assert_not_called()
 
 
+class ResolveRetrievalRequestTests(unittest.TestCase):
+    def test_preserves_existing_relative_file_request(self):
+        request = RetrievalRequest(
+            tool=READ_FILE,
+            path="ExampleService.java",
+            query=None,
+        )
+
+        result = resolve_retrieval_request(FIXTURE_WORKSPACE, request)
+
+        self.assertIs(request, result)
+
+    def test_converts_missing_relative_file_to_search(self):
+        request = RetrievalRequest(
+            tool=READ_FILE,
+            path="Calculator.java",
+            query=None,
+        )
+
+        result = resolve_retrieval_request(FIXTURE_WORKSPACE, request)
+
+        self.assertEqual(
+            RetrievalRequest(
+                tool=SEARCH_FILES,
+                path=None,
+                query="Calculator.java",
+            ),
+            result,
+        )
+
+    def test_preserves_search_request(self):
+        request = RetrievalRequest(
+            tool=SEARCH_FILES,
+            path=None,
+            query="Calculator",
+        )
+
+        result = resolve_retrieval_request(FIXTURE_WORKSPACE, request)
+
+        self.assertIs(request, result)
+
+    def test_preserves_absolute_read_for_tool_validation(self):
+        request = RetrievalRequest(
+            tool=READ_FILE,
+            path="/tmp/Outside.java",
+            query=None,
+        )
+
+        result = resolve_retrieval_request(FIXTURE_WORKSPACE, request)
+
+        self.assertIs(request, result)
+
+    def test_preserves_parent_traversal_for_tool_validation(self):
+        request = RetrievalRequest(
+            tool=READ_FILE,
+            path="../Outside.java",
+            query=None,
+        )
+
+        result = resolve_retrieval_request(FIXTURE_WORKSPACE, request)
+
+        self.assertIs(request, result)
+
+    def test_normalizes_windows_separators_when_file_exists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            target = workspace / "src" / "Example.java"
+            target.parent.mkdir()
+            target.touch()
+            request = RetrievalRequest(
+                tool=READ_FILE,
+                path=r"src\Example.java",
+                query=None,
+            )
+
+            result = resolve_retrieval_request(workspace, request)
+
+        self.assertIs(request, result)
+
+
 class BuildRetrievalContextTests(unittest.TestCase):
     def test_describes_empty_state_and_remaining_rounds(self):
         context = build_retrieval_context(
@@ -653,6 +736,12 @@ class BuildRetrievalContextTests(unittest.TestCase):
 
 class RunRetrievalLoopTests(unittest.TestCase):
     def setUp(self):
+        resolver = patch(
+            "cd_assist.retrieval.resolve_retrieval_request",
+            side_effect=lambda workspace, request: request,
+        )
+        resolver.start()
+        self.addCleanup(resolver.stop)
         self.interpretation = TaskInterpretation(
             intent="find_bugs",
             target="UserService.java",
@@ -881,6 +970,171 @@ class RunRetrievalLoopTests(unittest.TestCase):
 
         self.assertEqual(StopReason.AGENT_ERROR, state.stop_reason)
         self.assertEqual(1, len(state.observations))
+
+
+class RetrievalResolutionLoopTests(unittest.TestCase):
+    def setUp(self):
+        self.interpretation = TaskInterpretation(
+            intent=TaskIntent.GENERATE_TESTS,
+            target="Calculator.java",
+            search_terms=["Calculator.java"],
+        )
+
+    @patch("cd_assist.retrieval.build_retrieval_context", return_value="context")
+    @patch("cd_assist.retrieval.execute_retrieval", return_value=[])
+    def test_resolves_missing_initial_read_before_execution(
+        self,
+        execute_retrieval,
+        build_retrieval_context,
+    ):
+        initial_request = RetrievalRequest(
+            tool=READ_FILE,
+            path="Calculator.java",
+            query=None,
+        )
+        decide_next = Mock(
+            return_value=RetrievalDecision(
+                action="stop",
+                tool=None,
+                path=None,
+                query=None,
+                stop_reason="no_results",
+                reason="No matching file was found.",
+            )
+        )
+
+        state = run_retrieval_loop(
+            FIXTURE_WORKSPACE,
+            self.interpretation,
+            initial_request,
+            decide_next,
+        )
+
+        effective_request = RetrievalRequest(
+            tool=SEARCH_FILES,
+            path=None,
+            query="Calculator.java",
+        )
+        self.assertEqual([effective_request], state.requests)
+        self.assertEqual(effective_request, state.observations[0].request)
+        execute_retrieval.assert_called_once_with(
+            FIXTURE_WORKSPACE,
+            effective_request,
+        )
+        self.assertEqual(StopReason.NO_RESULTS, state.stop_reason)
+
+    @patch("cd_assist.retrieval.build_retrieval_context", return_value="context")
+    @patch("cd_assist.retrieval.execute_retrieval", side_effect=[[], []])
+    def test_resolves_missing_subsequent_read_before_execution(
+        self,
+        execute_retrieval,
+        build_retrieval_context,
+    ):
+        initial_request = RetrievalRequest(
+            tool=SEARCH_FILES,
+            path=None,
+            query="Calculator",
+        )
+        decide_next = Mock(
+            side_effect=[
+                RetrievalDecision(
+                    action="retrieve",
+                    tool=READ_FILE,
+                    path="Calculator.java",
+                    query=None,
+                    stop_reason=None,
+                    reason="Read the discovered target.",
+                ),
+                RetrievalDecision(
+                    action="stop",
+                    tool=None,
+                    path=None,
+                    query=None,
+                    stop_reason="no_results",
+                    reason="No exact file was found.",
+                ),
+            ]
+        )
+
+        state = run_retrieval_loop(
+            FIXTURE_WORKSPACE,
+            self.interpretation,
+            initial_request,
+            decide_next,
+        )
+
+        resolved_request = RetrievalRequest(
+            tool=SEARCH_FILES,
+            path=None,
+            query="Calculator.java",
+        )
+        self.assertEqual([initial_request, resolved_request], state.requests)
+        self.assertEqual(
+            [initial_request, resolved_request],
+            [call.args[1] for call in execute_retrieval.call_args_list],
+        )
+
+    @patch("cd_assist.retrieval.build_retrieval_context", return_value="context")
+    @patch("cd_assist.retrieval.execute_retrieval", return_value=[])
+    def test_repeat_detection_uses_effective_request(
+        self,
+        execute_retrieval,
+        build_retrieval_context,
+    ):
+        initial_request = RetrievalRequest(
+            tool=READ_FILE,
+            path="Calculator.java",
+            query=None,
+        )
+        decide_next = Mock(
+            return_value=RetrievalDecision(
+                action="retrieve",
+                tool=READ_FILE,
+                path="Calculator.java",
+                query=None,
+                stop_reason=None,
+                reason="Try the same unresolved file again.",
+            )
+        )
+
+        state = run_retrieval_loop(
+            FIXTURE_WORKSPACE,
+            self.interpretation,
+            initial_request,
+            decide_next,
+        )
+
+        self.assertEqual(StopReason.REPEATED_REQUEST, state.stop_reason)
+        self.assertEqual(1, execute_retrieval.call_count)
+        self.assertEqual(1, len(state.requests))
+
+    def test_existing_initial_path_remains_a_read(self):
+        initial_request = RetrievalRequest(
+            tool=READ_FILE,
+            path="ExampleService.java",
+            query=None,
+        )
+        decide_next = Mock(
+            return_value=RetrievalDecision(
+                action="stop",
+                tool=None,
+                path=None,
+                query=None,
+                stop_reason="sufficient_evidence",
+                reason="The target file was read.",
+            )
+        )
+
+        state = run_retrieval_loop(
+            FIXTURE_WORKSPACE,
+            self.interpretation,
+            initial_request,
+            decide_next,
+        )
+
+        self.assertEqual([initial_request], state.requests)
+        self.assertEqual(READ_FILE, state.observations[0].request.tool)
+        self.assertEqual(StopReason.SUFFICIENT_EVIDENCE, state.stop_reason)
 
 
 class RetrievalLoopIntegrationTests(unittest.TestCase):

@@ -14,6 +14,7 @@ from cd_assist.agent import (
     analyze_bugs,
     decide_next_retrieval,
     generate_response,
+    init_agent,
     interpret_intention,
     select_tool,
 )
@@ -27,8 +28,17 @@ from cd_assist.models import (
     SEARCH_FILES,
     RetrievalDecision,
     RetrievalRequest,
+    RetrievalState,
+    StopReason,
     TaskIntent,
     TaskInterpretation,
+    TestGenerationContext,
+)
+from cd_assist.test_generation import (
+    BuildTool,
+    TestDiscoveryStatus,
+    TestFramework,
+    TestFrameworkDiscovery,
 )
 
 
@@ -185,6 +195,159 @@ class CodingAssistantAgentTests(unittest.TestCase):
             interpretation,
             "retrieval context",
         )
+
+    def test_initializer_does_not_require_test_generation_callback(self):
+        client = object()
+
+        agent = init_agent(FIXTURE_WORKSPACE, client)
+
+        self.assertIs(client, agent.client)
+        self.assertEqual(FIXTURE_WORKSPACE, agent.workspace)
+        self.assertFalse(hasattr(agent, "generate_tests"))
+
+
+class GatherTestGenerationContextTests(unittest.TestCase):
+    def make_agent(self, interpretation):
+        return CodingAssistantAgent(
+            object(),
+            FIXTURE_WORKSPACE,
+            Mock(),
+            Mock(return_value=interpretation),
+            Mock(),
+            Mock(),
+            Mock(),
+        )
+
+    def make_discovery(self):
+        return TestFrameworkDiscovery(
+            test_framework=TestFramework.UNKNOWN,
+            build_tool=BuildTool.UNKNOWN,
+            build_reason="Neither Gradle nor Maven was found.",
+            source_roots=[],
+            test_roots=[],
+            evidence_paths=[],
+            test_status=TestDiscoveryStatus.INSUFFICIENT_EVIDENCE,
+            test_reason="Neither JUnit 4 nor JUnit 5 was found.",
+        )
+
+    @patch("cd_assist.agent.discover_test_framework")
+    def test_combines_one_interpretation_with_discovery_and_evidence(
+        self,
+        discover_test_framework,
+    ):
+        request = "for RetryPolicy.java"
+        interpretation = TaskInterpretation(
+            intent=TaskIntent.GENERATE_TESTS,
+            target="RetryPolicy.java",
+            search_terms=["RetryPolicy.java", "RetryPolicy"],
+        )
+        evidence = EvidenceSet(
+            items=[
+                EvidenceItem(
+                    path="RetryPolicy.java",
+                    start_line=1,
+                    content="class RetryPolicy {}",
+                    source=READ_FILE,
+                    truncated=False,
+                )
+            ],
+            truncated=False,
+            context_str="Evidence 0: RetryPolicy.java",
+        )
+        state = Mock()
+        state.build_evidence_set.return_value = evidence
+        discovery = self.make_discovery()
+        discover_test_framework.return_value = discovery
+        agent = self.make_agent(interpretation)
+        agent.gather_retrievals_for_interpretation = Mock(return_value=state)
+
+        result = agent.gather_test_generation_context(request)
+
+        self.assertIsInstance(result, TestGenerationContext)
+        self.assertEqual(request, result.request)
+        self.assertIs(interpretation, result.interpretation)
+        self.assertIs(discovery, result.discovery)
+        self.assertIs(evidence, result.evidence)
+        agent.interpret_intention.assert_called_once_with(agent.client, request)
+        agent.gather_retrievals_for_interpretation.assert_called_once_with(
+            interpretation
+        )
+        discover_test_framework.assert_called_once_with(FIXTURE_WORKSPACE)
+
+    @patch("cd_assist.agent.discover_test_framework")
+    def test_rejects_non_test_intent_before_retrieval_or_discovery(
+        self,
+        discover_test_framework,
+    ):
+        interpretation = TaskInterpretation(
+            intent=TaskIntent.FIND_BUGS,
+            target="RetryPolicy.java",
+            search_terms=["RetryPolicy"],
+        )
+        agent = self.make_agent(interpretation)
+        agent.gather_retrievals_for_interpretation = Mock()
+
+        with self.assertRaisesRegex(ValueError, "Expected a test-generation task"):
+            agent.gather_test_generation_context("find bugs in RetryPolicy.java")
+
+        agent.gather_retrievals_for_interpretation.assert_not_called()
+        discover_test_framework.assert_not_called()
+
+    @patch("cd_assist.agent.discover_test_framework")
+    def test_reports_retrieval_tool_error_before_discovery(
+        self,
+        discover_test_framework,
+    ):
+        interpretation = TaskInterpretation(
+            intent=TaskIntent.GENERATE_TESTS,
+            target="Calculator.java",
+            search_terms=["Calculator.java"],
+        )
+        state = RetrievalState(stop_reason=StopReason.TOOL_ERROR)
+        agent = self.make_agent(interpretation)
+        agent.gather_retrievals_for_interpretation = Mock(return_value=state)
+
+        with self.assertRaisesRegex(ModelResponseError, "tool"):
+            agent.gather_test_generation_context(
+                "generate tests for Calculator.java"
+            )
+
+        discover_test_framework.assert_not_called()
+
+    def test_context_console_output_includes_all_session_three_sections(self):
+        interpretation = TaskInterpretation(
+            intent=TaskIntent.GENERATE_TESTS,
+            target=None,
+            search_terms=["SlugFormatter"],
+        )
+        discovery = self.make_discovery()
+        evidence = EvidenceSet(
+            items=[
+                EvidenceItem(
+                    path="SlugFormatter.java",
+                    start_line=1,
+                    content="class SlugFormatter {}",
+                    source=READ_FILE,
+                    truncated=False,
+                )
+            ],
+            truncated=False,
+            context_str="Evidence 0: SlugFormatter.java",
+        )
+        context = TestGenerationContext(
+            request="generate tests for SlugFormatter",
+            interpretation=interpretation,
+            discovery=discovery,
+            evidence=evidence,
+        )
+
+        output = context.to_console_string()
+
+        self.assertIn("Intent: generate_tests", output)
+        self.assertIn("Target: Unknown", output)
+        self.assertIn("Build Tool: unknown", output)
+        self.assertIn("Status: insufficient_evidence", output)
+        self.assertIn("Evidence 0: SlugFormatter.java", output)
 
 
 class RetrievalEvidenceIntegrationTests(unittest.TestCase):

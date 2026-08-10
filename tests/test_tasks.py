@@ -18,6 +18,16 @@ from cd_assist.models import (
 
 
 class TaskInterpretationTests(unittest.TestCase):
+    def test_accepts_generate_tests_intent(self):
+        interpretation = TaskInterpretation(
+            intent=TaskIntent.GENERATE_TESTS,
+            target="Calculator.java",
+            search_terms=["Calculator.java"],
+        )
+
+        self.assertEqual(TaskIntent.GENERATE_TESTS, interpretation.intent)
+        self.assertEqual("Calculator.java", interpretation.target)
+
     def test_accepts_answer_question_with_no_known_target(self):
         interpretation = TaskInterpretation(
             intent="answer_question",

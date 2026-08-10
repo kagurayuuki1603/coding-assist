@@ -5,6 +5,7 @@ from cd_assist.cli import (
     handle_ask_command,
     handle_explain_command,
     handle_find_bug_command,
+    handle_generate_test_command,
     handle_interpret_command,
     handle_select_tool_command,
     run_app,
@@ -244,6 +245,30 @@ class RunAppTests(unittest.TestCase):
         )
         print_goodbye.assert_called_once_with()
 
+    @patch("cd_assist.cli.print_goodbye")
+    @patch("cd_assist.cli.print_intro")
+    @patch("cd_assist.cli.handle_generate_test_command")
+    @patch(
+        "builtins.input",
+        side_effect=["generate tests for RetryPolicy.java", "exit"],
+    )
+    def test_routes_generate_tests_command(
+        self,
+        input_mock,
+        handle_generate_test_command,
+        print_intro,
+        print_goodbye,
+    ):
+        agent = Mock()
+
+        run_app("workspace", agent)
+
+        handle_generate_test_command.assert_called_once_with(
+            "generate tests for RetryPolicy.java",
+            agent,
+        )
+        print_goodbye.assert_called_once_with()
+
 
 class HandleSelectToolCommandTests(unittest.TestCase):
     @patch("builtins.print")
@@ -337,6 +362,53 @@ class HandleFindBugCommandTests(unittest.TestCase):
         agent.find_bugs.side_effect = error
 
         handle_find_bug_command("find bugs in ExampleService.java", agent)
+
+        print_exception.assert_called_once_with(error)
+        print_agent_response.assert_not_called()
+
+
+class HandleGenerateTestCommandTests(unittest.TestCase):
+    @patch("cd_assist.cli.print_agent_response")
+    def test_gathers_and_prints_test_generation_context(self, print_agent_response):
+        context = Mock()
+        context.to_console_string.return_value = "test generation context"
+        agent = Mock()
+        agent.gather_test_generation_context.return_value = context
+
+        handle_generate_test_command(
+            "generate tests for RetryPolicy.java",
+            agent,
+        )
+
+        agent.gather_test_generation_context.assert_called_once_with(
+            "generate tests for RetryPolicy.java"
+        )
+        print_agent_response.assert_called_once_with("test generation context")
+
+    @patch("cd_assist.cli.print_no_query")
+    def test_reports_missing_query(self, print_no_query):
+        agent = Mock()
+
+        handle_generate_test_command("generate tests", agent)
+
+        print_no_query.assert_called_once_with()
+        agent.gather_test_generation_context.assert_not_called()
+
+    @patch("cd_assist.cli.print_agent_response")
+    @patch("cd_assist.cli.print_exception")
+    def test_reports_context_generation_error(
+        self,
+        print_exception,
+        print_agent_response,
+    ):
+        agent = Mock()
+        error = ModelResponseError("Could not interpret test-generation task")
+        agent.gather_test_generation_context.side_effect = error
+
+        handle_generate_test_command(
+            "generate tests for RetryPolicy.java",
+            agent,
+        )
 
         print_exception.assert_called_once_with(error)
         print_agent_response.assert_not_called()

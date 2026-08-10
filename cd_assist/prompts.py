@@ -34,7 +34,7 @@ Interpret the user's repository task.
 Return:
 - intent: "answer_question" when the user asks how code works or where
   behavior is implemented; use "find_bugs" when the user asks to identify
-  defects.
+  defects; use "generate_tests" when the user asks to generate tests
 - target: the Java filename or relative file path explicitly mentioned by
   the user; otherwise null. Do not invent a target.
 - search_terms: 1 to 5 concise terms useful for repository search. Include

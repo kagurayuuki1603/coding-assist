@@ -1,0 +1,7 @@
+{
+  "build_tool": "gradle",
+  "test_framework": "junit4",
+  "source_roots": ["src/main/java"],
+  "test_roots": ["src/test/java"],
+  "status": "discovered"
+}

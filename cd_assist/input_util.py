@@ -21,3 +21,6 @@ def should_retrieve_tool(user_input):
 
 def should_find_bugs(user_input):
     return check_input(user_input, "find bugs")
+
+def should_generate_tests(user_input):
+    return check_input(user_input, "generate tests")

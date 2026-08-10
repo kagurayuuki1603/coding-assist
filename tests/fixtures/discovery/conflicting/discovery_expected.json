@@ -1,0 +1,7 @@
+{
+  "build_tool": "maven",
+  "test_framework": "unknown",
+  "source_roots": ["src/main/java"],
+  "test_roots": ["src/test/java"],
+  "status": "conflicting_evidence"
+}

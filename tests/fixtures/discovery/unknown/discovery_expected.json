@@ -1,0 +1,7 @@
+{
+  "build_tool": "unknown",
+  "test_framework": "unknown",
+  "source_roots": ["src/main/java"],
+  "test_roots": [],
+  "status": "insufficient_evidence"
+}

@@ -1,3 +1,4 @@
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from cd_assist.errors import FileParseError, ModelResponseError
@@ -83,6 +84,25 @@ Result:
     return context_str
 
 
+def resolve_retrieval_request(workspace, request: RetrievalRequest)-> RetrievalRequest:
+    if request.tool != READ_FILE:
+        return request
+
+    workspace_path = Path(workspace)
+    requested_path = PurePosixPath(request.path.replace("\\", "/"))
+
+    if requested_path.is_absolute() or ".." in requested_path.parts:
+        return request
+
+    if (workspace_path / requested_path).is_file():
+        return request
+
+    return RetrievalRequest(
+        tool=SEARCH_FILES,
+        path=None,
+        query=request.path,
+    )
+
 
 def run_retrieval_loop(
     workspace, 
@@ -100,6 +120,8 @@ def run_retrieval_loop(
         if current_rounds == max_rounds:
             state.stop_reason = StopReason.MAX_ROUNDS
             return state
+
+        current_request = resolve_retrieval_request(workspace, current_request)
 
         if state.was_attempted(current_request):
             state.stop_reason = StopReason.REPEATED_REQUEST

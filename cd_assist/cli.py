@@ -9,11 +9,13 @@ from cd_assist.input_util import (
     should_exit,
     should_explain,
     should_find_bugs,
+    should_generate_tests,
     should_interpret,
     should_select_tool,
     should_retrieve_tool,
 )
-from cd_assist.models import BugAnalysis
+from cd_assist.models import BugAnalysis, TestGenerationContext
+from cd_assist.test_generation import FrameworkDiscoveryError
 from cd_assist.print import (
     print_agent_response,
     print_exception,
@@ -130,6 +132,19 @@ def handle_find_bug_command(user_input: str, agent: CodingAssistantAgent):
     
     print_agent_response(bug_analysis.to_console_string())
 
+def handle_generate_test_command(user_input: str, agent: CodingAssistantAgent):
+    query = user_input[len("generate tests"):].strip()
+
+    if not query:
+        print_no_query()
+        return
+    try:
+        test_context: TestGenerationContext = agent.gather_test_generation_context(user_input.strip())
+        print_agent_response(test_context.to_console_string())
+    except (ValueError, ModelResponseError, FrameworkDiscoveryError) as error:
+        print_exception(error)
+        return
+
 def run_app(workspace, agent):
     print_intro(workspace)
 
@@ -158,6 +173,9 @@ def run_app(workspace, agent):
 
             elif should_find_bugs(user_input):
                 handle_find_bug_command(user_input, agent)
+
+            elif should_generate_tests(user_input):
+                handle_generate_test_command(user_input, agent)
 
             else:
                 print_idk()
