@@ -527,6 +527,7 @@ class AgentBugEvaluationTests(unittest.TestCase):
                         side_effect=scenario.next_decisions
                     ),
                     analyze_bugs=analyzer,
+                    propose_tests=Mock(),
                 )
 
                 analysis = agent.find_bugs(scenario.case.request)

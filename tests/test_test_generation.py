@@ -5,13 +5,17 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from cd_assist.models import EvidenceItem, EvidenceSet, READ_FILE, TaskIntent, TaskInterpretation
 from cd_assist.test_generation import (
     BuildTool,
     FrameworkDiscoveryError,
     MAX_DISCOVERY_EVIDENCE_PATHS,
+    ProposedTestCase,
     TestDiscoveryStatus,
     TestFramework,
     TestFrameworkDiscovery,
+    TestGenerationContext,
+    TestProposal,
     contains_all,
     contains_any,
     discover_build_tool,
@@ -25,6 +29,357 @@ from cd_assist.test_generation import (
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "discovery"
+
+
+class ProposedTestCaseTests(unittest.TestCase):
+    def test_accepts_test_case_with_supporting_evidence(self):
+        test_case = ProposedTestCase(
+            name="returnsFalseAfterMaximumAttempts",
+            behavior="Retries stop after the configured maximum attempt count.",
+            rationale="The boundary controls whether another operation is attempted.",
+            evidence_indices=[0],
+        )
+
+        self.assertEqual("returnsFalseAfterMaximumAttempts", test_case.name)
+        self.assertEqual([0], test_case.evidence_indices)
+
+    def test_rejects_more_than_ten_evidence_indices(self):
+        with self.assertRaises(ValidationError):
+            ProposedTestCase(
+                name="coversBoundary",
+                behavior="Covers the retry boundary.",
+                rationale="The boundary is important.",
+                evidence_indices=list(range(11)),
+            )
+
+    def test_rejects_blank_and_overlong_name(self):
+        for invalid_name in ("   ", "n" * 501):
+            with self.subTest(name_length=len(invalid_name)):
+                with self.assertRaises(ValidationError):
+                    ProposedTestCase(
+                        name=invalid_name,
+                        behavior="Covers the retry boundary.",
+                        rationale="The boundary is important.",
+                        evidence_indices=[0],
+                    )
+
+    def test_rejects_blank_and_overlong_behavior_or_rationale(self):
+        for field_name in ("behavior", "rationale"):
+            for invalid_text in ("   ", "x" * 1_001):
+                with self.subTest(field=field_name, text_length=len(invalid_text)):
+                    values = {
+                        "name": "coversBoundary",
+                        "behavior": "Covers the retry boundary.",
+                        "rationale": "The boundary is important.",
+                        "evidence_indices": [0],
+                    }
+                    values[field_name] = invalid_text
+
+                    with self.assertRaises(ValidationError):
+                        ProposedTestCase(**values)
+
+    def test_rejects_empty_evidence_indices(self):
+        with self.assertRaises(ValidationError):
+            ProposedTestCase(
+                name="coversBoundary",
+                behavior="Covers the retry boundary.",
+                rationale="The boundary is important.",
+                evidence_indices=[],
+            )
+
+    def test_rejects_negative_evidence_index(self):
+        with self.assertRaises(ValidationError):
+            ProposedTestCase(
+                name="coversBoundary",
+                behavior="Covers the retry boundary.",
+                rationale="The boundary is important.",
+                evidence_indices=[-1],
+            )
+
+    def test_rejects_duplicate_evidence_indices(self):
+        with self.assertRaisesRegex(ValueError, "unique"):
+            ProposedTestCase(
+                name="coversBoundary",
+                behavior="Covers the retry boundary.",
+                rationale="The boundary is important.",
+                evidence_indices=[0, 0],
+            )
+
+    def test_rejects_extra_fields(self):
+        with self.assertRaises(ValidationError):
+            ProposedTestCase(
+                name="coversBoundary",
+                behavior="Covers the retry boundary.",
+                rationale="The boundary is important.",
+                evidence_indices=[0],
+                source_code="assertTrue(true);",
+            )
+
+
+class TestProposalTests(unittest.TestCase):
+    def make_test_case(self, **overrides):
+        values = {
+            "name": "returnsFalseAfterMaximumAttempts",
+            "behavior": "Retries stop after the configured maximum attempt count.",
+            "rationale": "The boundary controls whether another operation is attempted.",
+            "evidence_indices": [0],
+        }
+        values.update(overrides)
+        return ProposedTestCase(**values)
+
+    def make_proposal(self, **overrides):
+        values = {
+            "target_path": "src/main/java/com/example/RetryPolicy.java",
+            "proposed_test_path": "src/test/java/com/example/RetryPolicyTest.java",
+            "test_framework": TestFramework.JUNIT5,
+            "test_cases": [self.make_test_case()],
+            "assumptions": [],
+            "insufficient_evidence_reason": None,
+        }
+        values.update(overrides)
+        return TestProposal(**values)
+
+    def make_context(self, **overrides):
+        values = {
+            "request": "generate tests for RetryPolicy.java",
+            "interpretation": TaskInterpretation(
+                intent=TaskIntent.GENERATE_TESTS,
+                target="src/main/java/com/example/RetryPolicy.java",
+                search_terms=["RetryPolicy.java"],
+            ),
+            "discovery": TestFrameworkDiscovery(
+                test_framework=TestFramework.JUNIT5,
+                build_tool=BuildTool.MAVEN,
+                source_roots=["src/main/java"],
+                test_roots=["src/test/java"],
+                evidence_paths=["pom.xml"],
+                test_status=TestDiscoveryStatus.DISCOVERED,
+            ),
+            "evidence": EvidenceSet(
+                items=[
+                    EvidenceItem(
+                        path="src/main/java/com/example/RetryPolicy.java",
+                        start_line=1,
+                        content="class RetryPolicy {}",
+                        source=READ_FILE,
+                        truncated=False,
+                    )
+                ],
+                truncated=False,
+            ),
+        }
+        values.update(overrides)
+        return TestGenerationContext(**values)
+
+    def test_accepts_successful_proposal_with_test_cases(self):
+        proposal = self.make_proposal()
+
+        self.assertEqual(TestFramework.JUNIT5, proposal.test_framework)
+        self.assertEqual(1, len(proposal.test_cases))
+        self.assertIsNone(proposal.insufficient_evidence_reason)
+
+    def test_accepts_insufficient_evidence_without_test_cases(self):
+        proposal = self.make_proposal(
+            target_path=None,
+            proposed_test_path=None,
+            test_framework=TestFramework.UNKNOWN,
+            test_cases=[],
+            insufficient_evidence_reason="The repository test framework is unknown.",
+        )
+
+        self.assertIsNone(proposal.target_path)
+        self.assertIsNone(proposal.proposed_test_path)
+        self.assertEqual([], proposal.test_cases)
+        self.assertIsNotNone(proposal.insufficient_evidence_reason)
+
+    def test_successful_proposal_requires_target_and_proposed_paths(self):
+        for field_name in ("target_path", "proposed_test_path"):
+            with self.subTest(field=field_name):
+                with self.assertRaisesRegex(ValueError, "requires"):
+                    self.make_proposal(**{field_name: None})
+
+    def test_successful_proposal_requires_at_least_one_test_case(self):
+        with self.assertRaisesRegex(ValueError, "at least 1"):
+            self.make_proposal(test_cases=[])
+
+    def test_insufficient_proposal_rejects_test_cases(self):
+        with self.assertRaisesRegex(ValueError, "should not have"):
+            self.make_proposal(
+                insufficient_evidence_reason="The framework is unknown."
+            )
+
+    def test_rejects_duplicate_test_names_case_insensitively(self):
+        with self.assertRaisesRegex(ValueError, "unique"):
+            self.make_proposal(
+                test_cases=[
+                    self.make_test_case(name="handlesBoundary"),
+                    self.make_test_case(name=" HandlesBoundary "),
+                ]
+            )
+
+    def test_normalizes_windows_paths(self):
+        proposal = self.make_proposal(
+            target_path=r"src\main\java\RetryPolicy.java",
+            proposed_test_path=r"src\test\java\RetryPolicyTest.java",
+        )
+
+        self.assertEqual("src/main/java/RetryPolicy.java", proposal.target_path)
+        self.assertEqual(
+            "src/test/java/RetryPolicyTest.java",
+            proposal.proposed_test_path,
+        )
+
+    def test_rejects_absolute_and_parent_traversal_paths(self):
+        for field_name, invalid_path in (
+            ("target_path", "/repo/RetryPolicy.java"),
+            ("proposed_test_path", "../RetryPolicyTest.java"),
+        ):
+            with self.subTest(field=field_name):
+                with self.assertRaises(ValidationError):
+                    self.make_proposal(**{field_name: invalid_path})
+
+    def test_rejects_more_than_ten_test_cases_or_assumptions(self):
+        with self.assertRaises(ValidationError):
+            self.make_proposal(
+                test_cases=[
+                    self.make_test_case(name=f"case{index}")
+                    for index in range(11)
+                ]
+            )
+
+        with self.assertRaises(ValidationError):
+            self.make_proposal(
+                assumptions=[f"assumption {index}" for index in range(11)]
+            )
+
+    def test_rejects_extra_fields(self):
+        with self.assertRaises(ValidationError):
+            self.make_proposal(source_code="class RetryPolicyTest {}")
+
+    def test_unknown_framework_rejects_successful_proposal(self):
+        with self.assertRaisesRegex(ValueError, "framework"):
+            self.make_proposal(test_framework=TestFramework.UNKNOWN)
+
+    def test_rejects_blank_and_overlong_assumptions(self):
+        for invalid_assumption in ("   ", "a" * 1_001):
+            with self.subTest(assumption_length=len(invalid_assumption)):
+                with self.assertRaises(ValidationError):
+                    self.make_proposal(assumptions=[invalid_assumption])
+
+    def test_rejects_blank_and_overlong_insufficient_evidence_reason(self):
+        for invalid_reason in ("   ", "r" * 1_001):
+            with self.subTest(reason_length=len(invalid_reason)):
+                with self.assertRaises(ValidationError):
+                    self.make_proposal(
+                        test_framework=TestFramework.UNKNOWN,
+                        test_cases=[],
+                        insufficient_evidence_reason=invalid_reason,
+                    )
+
+    def test_validates_successful_proposal_against_context(self):
+        proposal = self.make_proposal()
+
+        result = proposal.validate_result(self.make_context())
+
+        self.assertIs(proposal, result)
+
+    def test_rejects_target_path_missing_from_evidence(self):
+        proposal = self.make_proposal(target_path="src/main/java/Other.java")
+
+        with self.assertRaisesRegex(ValueError, "Target path"):
+            proposal.validate_result(self.make_context())
+
+    def test_rejects_out_of_range_evidence_index(self):
+        proposal = self.make_proposal(
+            test_cases=[self.make_test_case(evidence_indices=[1])]
+        )
+
+        with self.assertRaisesRegex(ValueError, "outside the evidence set"):
+            proposal.validate_result(self.make_context())
+
+    def test_rejects_proposed_path_outside_discovered_test_roots(self):
+        proposal = self.make_proposal(
+            proposed_test_path="tests/RetryPolicyTest.java"
+        )
+
+        with self.assertRaisesRegex(ValueError, "discovered test root"):
+            proposal.validate_result(self.make_context())
+
+    def test_rejects_framework_that_differs_from_discovery(self):
+        proposal = self.make_proposal(test_framework=TestFramework.JUNIT4)
+
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            proposal.validate_result(self.make_context())
+
+    def test_accepts_insufficient_result_without_test_roots_or_evidence(self):
+        proposal = self.make_proposal(
+            target_path=None,
+            proposed_test_path=None,
+            test_framework=TestFramework.UNKNOWN,
+            test_cases=[],
+            insufficient_evidence_reason="The framework could not be discovered.",
+        )
+        context = self.make_context(
+            discovery=TestFrameworkDiscovery(
+                test_framework=TestFramework.UNKNOWN,
+                build_tool=BuildTool.UNKNOWN,
+                build_reason="No supported build configuration was found.",
+                source_roots=[],
+                test_roots=[],
+                evidence_paths=[],
+                test_status=TestDiscoveryStatus.INSUFFICIENT_EVIDENCE,
+                test_reason="No test framework was found.",
+            ),
+            evidence=EvidenceSet(items=[], truncated=False),
+        )
+
+        result = proposal.validate_result(context)
+
+        self.assertIs(proposal, result)
+
+    def test_formats_successful_proposal_for_console(self):
+        proposal = self.make_proposal(
+            assumptions=["RetryPolicy has no constructor dependencies."]
+        )
+
+        output = proposal.to_console_string()
+
+        self.assertIn("Test Proposal", output)
+        self.assertIn(
+            "Target: src/main/java/com/example/RetryPolicy.java",
+            output,
+        )
+        self.assertIn(
+            "Proposed Test Path: src/test/java/com/example/RetryPolicyTest.java",
+            output,
+        )
+        self.assertIn("Test Framework: junit5", output)
+        self.assertIn("Status: proposed", output)
+        self.assertIn("1. returnsFalseAfterMaximumAttempts", output)
+        self.assertIn("Evidence: 0", output)
+        self.assertIn("- RetryPolicy has no constructor dependencies.", output)
+
+    def test_formats_successful_proposal_without_assumptions(self):
+        output = self.make_proposal().to_console_string()
+
+        self.assertIn("Assumptions\nNone", output)
+
+    def test_formats_insufficient_proposal_for_console(self):
+        proposal = self.make_proposal(
+            target_path=None,
+            proposed_test_path=None,
+            test_framework=TestFramework.UNKNOWN,
+            test_cases=[],
+            insufficient_evidence_reason="The test framework is unknown.",
+        )
+
+        output = proposal.to_console_string()
+
+        self.assertIn("Target: None", output)
+        self.assertIn("Proposed Test Path: None", output)
+        self.assertIn("Status: insufficient_evidence", output)
+        self.assertIn("Reason: The test framework is unknown.", output)
+        self.assertNotIn("Test Cases", output)
 
 
 class TestFrameworkDiscoveryTests(unittest.TestCase):

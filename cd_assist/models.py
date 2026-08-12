@@ -7,7 +7,6 @@ from typing import Annotated, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from cd_assist.errors import ModelResponseError
-from cd_assist.test_generation import TestFrameworkDiscovery
 from cd_assist.tools import MatchType
 
 READ_FILE: Final = "read_file"
@@ -380,51 +379,4 @@ class BugAnalysis(BaseModel):
         return (
             f"Findings: {findings_str}\n"
             "Sufficient evidence found."
-        )
-
-
-####### TEST GENERATION RELATED MODELS #######
-class TestGenerationContext(BaseModel):
-    request: str
-    interpretation: TaskInterpretation
-    discovery: TestFrameworkDiscovery
-    evidence: EvidenceSet
-
-    def to_console_string(self) -> str:
-        target = self.interpretation.target or "Unknown"
-        search_terms = ", ".join(self.interpretation.search_terms)
-
-        discovery_reason_parts = [
-            reason
-            for reason in (
-                self.discovery.build_reason,
-                self.discovery.test_reason,
-            )
-            if reason is not None
-        ]
-        discovery_reason = (
-            " ".join(discovery_reason_parts)
-            if discovery_reason_parts
-            else "None"
-        )
-
-        evidence = self.evidence.to_console_string()
-
-        return (
-            f"Request: {self.request}\n\n"
-            "Task Interpretation\n"
-            f"Intent: {self.interpretation.intent.value}\n"
-            f"Target: {target}\n"
-            f"Search Terms: {search_terms}\n\n"
-            "Test Discovery\n"
-            f"Build Tool: {self.discovery.build_tool.value}\n"
-            f"Test Framework: {self.discovery.test_framework.value}\n"
-            f"Source Roots: {', '.join(self.discovery.source_roots) or 'None'}\n"
-            f"Test Roots: {', '.join(self.discovery.test_roots) or 'None'}\n"
-            f"Status: {self.discovery.test_status.value}\n"
-            f"Reason: {discovery_reason}\n"
-            f"Evidence Paths: "
-            f"{', '.join(self.discovery.evidence_paths) or 'None'}\n\n"
-            "Repository Evidence\n"
-            f"{evidence}"
         )

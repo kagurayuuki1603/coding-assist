@@ -369,21 +369,21 @@ class HandleFindBugCommandTests(unittest.TestCase):
 
 class HandleGenerateTestCommandTests(unittest.TestCase):
     @patch("cd_assist.cli.print_agent_response")
-    def test_gathers_and_prints_test_generation_context(self, print_agent_response):
-        context = Mock()
-        context.to_console_string.return_value = "test generation context"
+    def test_generates_and_prints_test_proposal(self, print_agent_response):
+        proposal = Mock()
+        proposal.to_console_string.return_value = "test proposal"
         agent = Mock()
-        agent.gather_test_generation_context.return_value = context
+        agent.generate_test_proposal.return_value = proposal
 
         handle_generate_test_command(
             "generate tests for RetryPolicy.java",
             agent,
         )
 
-        agent.gather_test_generation_context.assert_called_once_with(
+        agent.generate_test_proposal.assert_called_once_with(
             "generate tests for RetryPolicy.java"
         )
-        print_agent_response.assert_called_once_with("test generation context")
+        print_agent_response.assert_called_once_with("test proposal")
 
     @patch("cd_assist.cli.print_no_query")
     def test_reports_missing_query(self, print_no_query):
@@ -392,18 +392,18 @@ class HandleGenerateTestCommandTests(unittest.TestCase):
         handle_generate_test_command("generate tests", agent)
 
         print_no_query.assert_called_once_with()
-        agent.gather_test_generation_context.assert_not_called()
+        agent.generate_test_proposal.assert_not_called()
 
     @patch("cd_assist.cli.print_agent_response")
     @patch("cd_assist.cli.print_exception")
-    def test_reports_context_generation_error(
+    def test_reports_proposal_generation_error(
         self,
         print_exception,
         print_agent_response,
     ):
         agent = Mock()
         error = ModelResponseError("Could not interpret test-generation task")
-        agent.gather_test_generation_context.side_effect = error
+        agent.generate_test_proposal.side_effect = error
 
         handle_generate_test_command(
             "generate tests for RetryPolicy.java",

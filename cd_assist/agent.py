@@ -14,7 +14,6 @@ from cd_assist.models import (
     TaskIntent,
     TaskInterpretation,
     EvidenceSet,
-    TestGenerationContext,
 )
 from cd_assist.prompts import (
     ASK_INSTRUCTIONS,
@@ -23,8 +22,9 @@ from cd_assist.prompts import (
     INTERPRETATION_INSTRUCTIONS,
     NEXT_RETRIEVAL_INSTRUCTIONS,
     RETRIEVAL_SELECTION_INSTRUCTIONS,
+    TEST_PROPOSAL_INSTRUCTIONS,
 )
-from cd_assist.test_generation import discover_test_framework
+from cd_assist.test_generation import TestGenerationContext, TestProposal, discover_test_framework
 from cd_assist.tools import read_file
 from cd_assist.retrieval import run_retrieval_loop
 
@@ -38,8 +38,8 @@ def init_agent(workspace, client):
         select_tool=select_tool,
         decide_next_retrieval=decide_next_retrieval,
         analyze_bugs=analyze_bugs,
+        propose_tests=propose_tests
     )
-
 
 def interpret_intention(client: OpenAI, user_request: str) -> TaskInterpretation:
     try:
@@ -168,6 +168,35 @@ Evidence Set:
         )
     return request
 
+def propose_tests(client: OpenAI, context: TestGenerationContext) -> TestProposal:
+    try:
+        response = client.responses.parse(
+            model=client_config.MODEL_NAME,
+            input=[
+                {
+                    "role": "system",
+                    "content": TEST_PROPOSAL_INSTRUCTIONS,
+                },
+                {
+                    "role": "user",
+                    "content": f"Context: {context.to_console_string()}"
+                },
+            ],
+            text_format=TestProposal,
+        )
+    except OpenAIError as error:
+        raise ModelResponseError(
+            f"Could not propose tests: {error}"
+        ) from error
+
+    request = response.output_parsed
+
+    if request is None:
+        raise ModelResponseError(
+            "The model did not return a valid test proposal"
+        )
+    return request
+
 def generate_response(client: OpenAI, prompt: str) -> str:
     streamed_text = ""
 
@@ -199,6 +228,7 @@ class CodingAssistantAgent:
         select_tool: Callable[[OpenAI, TaskInterpretation], RetrievalRequest],
         decide_next_retrieval: Callable[[OpenAI, TaskInterpretation, str], RetrievalDecision],
         analyze_bugs: Callable[[OpenAI, EvidenceSet, str], BugAnalysis],
+        propose_tests: Callable[[OpenAI, TestGenerationContext], TestProposal],
     ):
         self.workspace = workspace
         self.client = client
@@ -207,6 +237,7 @@ class CodingAssistantAgent:
         self.select_tool = select_tool
         self.decide_next_retrieval = decide_next_retrieval
         self.analyze_bugs = analyze_bugs
+        self.propose_tests = propose_tests
 
     def explain_file(self, requested_path: str) -> str:
         file_result = read_file(self.workspace, requested_path)
@@ -265,12 +296,11 @@ Query: {query}
 
         return state.build_evidence_set()
 
-
     def find_bugs(self, query: str) -> BugAnalysis:
         evidence_set: EvidenceSet = self.gather_evidence(query)
 
         analysis: BugAnalysis = self.analyze_bugs(self.client, evidence_set, query)
-        try: 
+        try:
             analysis.validate_evidence_references(evidence_set) 
         except ValueError as error:
             raise ModelResponseError(f"The model did not return a valid bug analysis: {error}") from error
@@ -297,3 +327,15 @@ Query: {query}
             discovery=discovery,
             evidence=evidence,
         )
+
+    def generate_test_proposal(self, query: str) -> TestProposal:
+        context: TestGenerationContext = self.gather_test_generation_context(query)
+
+        proposal: TestProposal = self.propose_tests(self.client, context)
+
+        try:
+            proposal.validate_result(context)
+        except ValueError as error:
+            raise ModelResponseError(f"The model did not return a valid test proposal: {error}") from error
+
+        return proposal

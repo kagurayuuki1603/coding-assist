@@ -5,6 +5,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, StringConstraints
 
+from cd_assist.models import EvidenceSet, TaskInterpretation
+
 MAX_DISCOVERY_FILE_BYTES = 200_000
 MAX_DISCOVERY_TEST_FILES = 100
 MAX_DISCOVERY_EVIDENCE_PATHS = 10
@@ -19,12 +21,10 @@ class BuildTool(str, Enum):
     UNKNOWN = "unknown"
     CONFLICTING = "conflicting"
 
-
 class TestFramework(str, Enum):
     JUNIT4 = "junit4"
     JUNIT5 = "junit5"
     UNKNOWN = "unknown"
-
 
 class TestDiscoveryStatus(str, Enum):
     DISCOVERED = "discovered"
@@ -75,40 +75,249 @@ class TestFrameworkDiscovery(BaseModel):
     @field_validator("source_roots", "test_roots", "evidence_paths")
     @classmethod
     def validate_relative_paths(cls, paths: list[str]) -> list[str]:
+        return normalize_relative_paths(paths)
 
-        normalized_paths: list[str] = []
-        seen: set[str] = set()
 
-        for raw_path in paths:
-            path = raw_path.strip()
+class TestGenerationContext(BaseModel):
+    request: str
+    interpretation: TaskInterpretation
+    discovery: TestFrameworkDiscovery
+    evidence: EvidenceSet
 
-            if not path:
-                raise ValueError("paths must not be blank")
+    def to_console_string(self) -> str:
+        target = self.interpretation.target or "Unknown"
+        search_terms = ", ".join(self.interpretation.search_terms)
 
-            # Convert Windows separators so results use one stable format.
-            path = path.replace("\\", "/")
-            parsed = PurePosixPath(path)
-            windows_path = PureWindowsPath(path)
+        discovery_reason_parts = [
+            reason
+            for reason in (
+                self.discovery.build_reason,
+                self.discovery.test_reason,
+            )
+            if reason is not None
+        ]
+        discovery_reason = (
+            " ".join(discovery_reason_parts)
+            if discovery_reason_parts
+            else "None"
+        )
 
-            if parsed.is_absolute() or windows_path.is_absolute():
-                raise ValueError("paths must be relative")
+        evidence = self.evidence.to_console_string()
 
-            if ".." in parsed.parts:
-                raise ValueError("paths must not contain parent traversal")
+        return (
+            f"Request: {self.request}\n\n"
+            "Task Interpretation\n"
+            f"Intent: {self.interpretation.intent.value}\n"
+            f"Target: {target}\n"
+            f"Search Terms: {search_terms}\n\n"
+            "Test Discovery\n"
+            f"Build Tool: {self.discovery.build_tool.value}\n"
+            f"Test Framework: {self.discovery.test_framework.value}\n"
+            f"Source Roots: {', '.join(self.discovery.source_roots) or 'None'}\n"
+            f"Test Roots: {', '.join(self.discovery.test_roots) or 'None'}\n"
+            f"Status: {self.discovery.test_status.value}\n"
+            f"Reason: {discovery_reason}\n"
+            f"Evidence Paths: "
+            f"{', '.join(self.discovery.evidence_paths) or 'None'}\n\n"
+            "Repository Evidence\n"
+            f"{evidence}"
+        )
 
-            normalized = parsed.as_posix()
+ProposedTestCaseName = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+]
 
-            if normalized == ".":
-                raise ValueError("paths must not be blank")
+BoundedProposalText = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=1_000,
+    ),
+]
 
-            if normalized in seen:
-                raise ValueError("paths must be unique")
+class ProposedTestCase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-            seen.add(normalized)
-            normalized_paths.append(normalized)
+    name: ProposedTestCaseName
+    behavior: BoundedProposalText
+    rationale: BoundedProposalText
+    evidence_indices: list[Annotated[int, Field(ge=0)]] = Field(min_length=1,max_length=10)
 
-        return normalized_paths
+    @field_validator("evidence_indices")
+    @classmethod
+    def validate_evidence_indices(cls, indices: list[int]) -> list[int]:
+        if len(indices) != len(set(indices)):
+            raise ValueError("Evidence indices must be unique")
 
+        return indices
+
+
+class TestProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_path: str | None
+    proposed_test_path: str | None
+    test_framework: TestFramework
+    test_cases: list[ProposedTestCase] = Field(max_length=10)
+    assumptions: list[BoundedProposalText] = Field(max_length=10)
+    insufficient_evidence_reason: BoundedProposalText | None = None
+
+
+    @model_validator(mode="after")
+    def validate_test_proposal(self):
+        if self.insufficient_evidence_reason is None :
+            if len(self.test_cases) == 0:
+                raise ValueError("Successful proposal requires at least 1 proposed testcase.")
+            if self.target_path is None:
+                raise ValueError("Successful proposal requires target path.")
+            if self.proposed_test_path is None:
+                raise ValueError("Successful proposal requires proposed test path.")
+
+        if self.insufficient_evidence_reason is not None and len(self.test_cases) > 0:
+            raise ValueError("Unsuccessful proposal should not have any proposed testcase.")
+
+        if self.test_framework == TestFramework.UNKNOWN and len(self.test_cases) > 0:
+            raise ValueError("Unsuccessful framework should not have any proposed testcase.")
+
+        normalized_names = [test_case.name.strip().lower() for test_case in self.test_cases]
+        if len(normalized_names) != len(set(normalized_names)):
+            raise ValueError("Test names must be unique")
+        return self
+
+
+    @field_validator("target_path", "proposed_test_path")
+    @classmethod
+    def validate_relative_paths(cls, path: str | None) -> str | None:
+        if path is not None:
+            return normalize_relative_path(path)
+        else:
+            return None
+
+
+    def validate_result(self, context: TestGenerationContext):
+        if self.test_framework != context.discovery.test_framework:
+            raise ValueError("Framework in proposal and discovery does not match.")
+
+        if self.insufficient_evidence_reason is None:
+            validate_path_under_test_root(
+                self.proposed_test_path,
+                context.discovery.test_roots,
+            )
+            validate_path_in_evidence_set(self.target_path, context.evidence)
+            validate_evidence_indices_in_range(
+                self.test_cases,
+                len(context.evidence.items),
+            )
+
+        return self
+
+    def to_console_string(self) -> str:
+        header = (
+            "Test Proposal\n"
+            f"Target: {self.target_path}\n"
+            f"Proposed Test Path: {self.proposed_test_path}\n"
+            f"Test Framework: {self.test_framework.value}\n"
+        )
+
+        if self.insufficient_evidence_reason is not None:
+            return (
+                f"{header}"
+                "Status: insufficient_evidence\n"
+                f"Reason: {self.insufficient_evidence_reason}"
+            )
+
+        test_cases = "\n".join(
+            (
+                f"{index}. {test_case.name}\n"
+                f"   Behavior: {test_case.behavior}\n"
+                f"   Rationale: {test_case.rationale}\n"
+                "   Evidence: "
+                f"{', '.join(str(item) for item in test_case.evidence_indices)}"
+            )
+            for index, test_case in enumerate(self.test_cases, start=1)
+        )
+        assumptions = (
+            "\n".join(f"- {assumption}" for assumption in self.assumptions)
+            if self.assumptions
+            else "None"
+        )
+
+        return (
+            f"{header}"
+            "Status: proposed\n\n"
+            "Test Cases\n"
+            f"{test_cases}\n\n"
+            "Assumptions\n"
+            f"{assumptions}"
+        )
+
+
+def validate_evidence_indices_in_range(
+    test_cases: list[ProposedTestCase],
+    evidence_set_item_count: int,
+) -> None:
+    if not all(
+        index < evidence_set_item_count
+        for test_case in test_cases
+        for index in test_case.evidence_indices
+    ):
+        raise ValueError("Evidence index is outside the evidence set")
+
+def validate_path_in_evidence_set(target_path: str, evidence_set: EvidenceSet) -> None:
+    if not any(target_path == item.path for item in evidence_set.items):
+        raise ValueError("Target path must match a repository evidence path")
+
+def validate_path_under_test_root(proposed_path: str, test_roots: list[str]) -> bool:
+    normalized_path = normalize_relative_path(proposed_path)
+    proposed = PurePosixPath(normalized_path)
+
+    roots = [
+        PurePosixPath(normalize_relative_path(root))
+        for root in test_roots
+    ]
+
+    if not any(proposed.is_relative_to(root) and proposed != root for root in roots):
+        raise ValueError(
+            "Proposed test path must be beneath a discovered test root"
+        )
+
+    return True
+
+def normalize_relative_paths(paths: list[str]) -> list[str]:
+    normalized_paths = [
+        normalize_relative_path(path)
+        for path in paths
+    ]
+
+    if len(normalized_paths) != len(set(normalized_paths)):
+        raise ValueError("paths must be unique")
+
+    return normalized_paths
+
+def normalize_relative_path(raw_path: str) -> str:
+    path = raw_path.strip()
+
+    if not path:
+        raise ValueError("path must not be blank")
+
+    path = path.replace("\\", "/")
+    parsed = PurePosixPath(path)
+    windows_path = PureWindowsPath(path)
+
+    if parsed.is_absolute() or windows_path.is_absolute():
+        raise ValueError("path must be relative")
+
+    if ".." in parsed.parts:
+        raise ValueError("path must not contain parent traversal")
+
+    normalized = parsed.as_posix()
+
+    if normalized == ".":
+        raise ValueError("path must not be blank")
+
+    return normalized
 
 def discover_build_tool(
     workspace: Path,
