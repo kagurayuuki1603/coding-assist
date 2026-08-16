@@ -42,12 +42,11 @@ This project deliberately focuses on reliability and security:
 
 ## Current Status
 
-v0.3 is implemented and smoke-tested through v0.3.6. The CLI supports natural-language task
+v0.4 is implemented through v0.4.7. The CLI supports natural-language task
 interpretation, model-directed repository retrieval, bounded multi-step
-retrieval, normalized evidence-set construction, and structured evidence-based
-bug reports. Seeded positive, ambiguous, style-only, and missing-evidence cases
-provide repeatable bug-finding evaluation. Work proceeds next to v0.4 test
-generation as proposed changes.
+retrieval, structured evidence-based bug reports, and test generation as
+validated, unapplied repository changes. Fixture-based vertical tests cover the
+complete request-to-proposed-patch flow.
 
 Current capabilities:
 
@@ -72,8 +71,14 @@ Current capabilities:
 - friendly search-input and repository file errors
 - streamed model responses
 - friendly file and model error reporting
+- Maven and Gradle test-framework discovery
+- structured test proposals and validated CREATE patches
+- repository-aware duplicate and conflict detection for generated tests
+- same-session suppression of repeated test proposals
+- explicit reporting when an existing test requires future MODIFY support
+- test proposals that are printed without changing repository files
 - unit and integration-style tests for reading, searching, retrieval loops,
-  evidence construction, agent prompts, and CLI routing
+  evidence construction, agent prompts, test generation, and CLI routing
 
 The earlier `explain` and `ask` commands remain available. The v0.3 retrieval
 path can interpret a natural-language request, select an approved read tool,
@@ -145,7 +150,7 @@ Keep these two kinds of state separate:
 
 Conversation history alone is not enough to make a coding agent reliable after a failure or context reset.
 
-## Run v0.2
+## Run the CLI
 
 Create a `.env` file containing `OPENAI_API_KEY` and `OPENAI_MODEL`, then run:
 
@@ -177,6 +182,30 @@ exit
 `ask` currently expects a literal identifier or search term that is likely to
 appear in a Java path or source line. A question such as `ask Where is user
 validation performed?` requires the natural-language retrieval added in v0.3.
+
+To exercise the complete test-generation flow, run:
+
+```bash
+python3 -m cd_assist.cli \
+  --workspace tests/fixtures/test_generation_vertical
+```
+
+Then enter:
+
+```text
+generate tests for src/main/java/com/example/RetryPolicy.java
+generate tests for src/main/java/com/example/RetryPolicy.java
+exit
+```
+
+The first command prints a validated CREATE proposal with `Applied: False`.
+The second identical command reports that the proposal was already generated
+in the current session. Neither command writes `RetryPolicyTest.java`.
+
+Test generation currently supports new test files through unapplied CREATE
+proposals. If the destination test already exists, the assistant reports the
+missing test cases and states that adding them requires MODIFY support. MODIFY
+patches and controlled writes begin in v0.5.
 
 Run the project's tests:
 
@@ -224,9 +253,9 @@ inside source files.
 
 ## Next Version
 
-v0.4 begins test generation as proposed repository changes. Its first milestone,
-v0.4.1, discovers the repository's build configuration, test framework,
-existing tests, and testing conventions before proposing new tests.
+v0.5 introduces controlled writes and refactoring. Its first milestone expands
+the CREATE-only patch contract to represent validated MODIFY operations for
+existing files.
 
 ### `write_file()`
 
