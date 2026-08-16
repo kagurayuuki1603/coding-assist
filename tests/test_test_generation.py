@@ -10,6 +10,8 @@ from cd_assist.test_generation import (
     BuildTool,
     FrameworkDiscoveryError,
     MAX_DISCOVERY_EVIDENCE_PATHS,
+    PatchOperation,
+    ProposedPatch,
     ProposedTestCase,
     TestDiscoveryStatus,
     TestFramework,
@@ -29,6 +31,249 @@ from cd_assist.test_generation import (
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "discovery"
+
+
+class ProposedPatchTests(unittest.TestCase):
+    def make_test_case(self, **overrides):
+        values = {
+            "name": "retriesTransientFailure",
+            "behavior": "Retries a transient failure.",
+            "rationale": "Covers retry behavior.",
+            "evidence_indices": [0],
+        }
+        values.update(overrides)
+        return ProposedTestCase(**values)
+
+    def make_proposal(self, **overrides):
+        values = {
+            "target_path": "src/main/java/com/example/RetryPolicy.java",
+            "proposed_test_path": "src/test/java/com/example/RetryPolicyTest.java",
+            "test_framework": TestFramework.JUNIT5,
+            "test_cases": [self.make_test_case()],
+            "assumptions": [],
+            "insufficient_evidence_reason": None,
+        }
+        values.update(overrides)
+        return TestProposal(**values)
+
+    def make_discovery(self, **overrides):
+        values = {
+            "test_framework": TestFramework.JUNIT5,
+            "build_tool": BuildTool.MAVEN,
+            "source_roots": ["src/main/java"],
+            "test_roots": ["src/test/java"],
+            "evidence_paths": ["pom.xml"],
+            "test_status": TestDiscoveryStatus.DISCOVERED,
+        }
+        values.update(overrides)
+        return TestFrameworkDiscovery(**values)
+
+    def make_patch(self, **overrides):
+        values = {
+            "operation": PatchOperation.CREATE,
+            "path": "src/test/java/com/example/RetryPolicyTest.java",
+            "expected_existing_content": None,
+            "proposed_content": (
+                "package com.example;\n\n"
+                "import org.junit.jupiter.api.Test;\n\n"
+                "class RetryPolicyTest {\n"
+                "    @Test\n"
+                "    void retriesTransientFailure() {}\n"
+                "}\n"
+            ),
+            "rationale": "Adds JUnit coverage for transient retry behavior.",
+            "applied": False,
+        }
+        values.update(overrides)
+        return ProposedPatch(**values)
+
+    def test_accepts_create_patch_for_junit_test(self):
+        patch = self.make_patch()
+        proposal = self.make_proposal()
+        discovery = self.make_discovery()
+
+        patch.validate_result(proposal, discovery, FIXTURE_ROOT)
+
+        self.assertEqual(PatchOperation.CREATE, patch.operation)
+        self.assertTrue(patch.path.endswith("RetryPolicyTest.java"))
+        self.assertIn("org.junit.jupiter.api.Test", patch.proposed_content)
+        self.assertFalse(patch.applied)
+
+    def test_normalizes_windows_path(self):
+        patch = self.make_patch(
+            path=r"src\test\java\com\example\RetryPolicyTest.java"
+        )
+
+        self.assertEqual(
+            "src/test/java/com/example/RetryPolicyTest.java",
+            patch.path,
+        )
+
+    def test_rejects_absolute_and_parent_traversal_paths(self):
+        for invalid_path in (
+            "/repo/src/test/java/RetryPolicyTest.java",
+            "../RetryPolicyTest.java",
+        ):
+            with self.subTest(path=invalid_path):
+                with self.assertRaises(ValidationError):
+                    self.make_patch(path=invalid_path)
+
+    def test_create_rejects_expected_existing_content(self):
+        with self.assertRaisesRegex(ValueError, "existing content"):
+            self.make_patch(expected_existing_content="class RetryPolicyTest {}")
+
+    def test_rejects_applied_patch(self):
+        with self.assertRaises(ValidationError):
+            self.make_patch(applied=True)
+
+    def test_rejects_blank_and_overlong_patch_text(self):
+        for field_name in ("proposed_content", "rationale"):
+            for invalid_text in ("   ", "x" * 2_001):
+                with self.subTest(field=field_name, length=len(invalid_text)):
+                    with self.assertRaises(ValidationError):
+                        self.make_patch(**{field_name: invalid_text})
+
+    def test_rejects_unsupported_modify_operation(self):
+        with self.assertRaises(ValidationError):
+            self.make_patch(operation="modify")
+
+    def test_rejects_extra_fields(self):
+        with self.assertRaises(ValidationError):
+            self.make_patch(write_to_workspace=True)
+
+    def test_rejects_path_outside_test_root(self):
+        patch = self.make_patch(path="src/main/java/com/example/RetryPolicyTest.java")
+
+        with self.assertRaisesRegex(ValueError, "test root"):
+            patch.validate_result(
+                self.make_proposal(), self.make_discovery(), FIXTURE_ROOT
+            )
+
+    def test_accepts_junit4_import_for_junit4_proposal(self):
+        patch = self.make_patch(
+            proposed_content=(
+                "package com.example;\n\n"
+                "import org.junit.Test;\n\n"
+                "class RetryPolicyTest {\n"
+                "    @Test public void retriesTransientFailure() {}\n"
+                "}\n"
+            )
+        )
+        proposal = self.make_proposal(test_framework=TestFramework.JUNIT4)
+        discovery = self.make_discovery(
+            test_framework=TestFramework.JUNIT4,
+            build_tool=BuildTool.GRADLE,
+        )
+
+        patch.validate_result(proposal, discovery, FIXTURE_ROOT)
+
+    def test_rejects_non_java_destination(self):
+        patch = self.make_patch(path="src/test/java/com/example/RetryPolicyTest.txt")
+        proposal = self.make_proposal(
+            proposed_test_path="src/test/java/com/example/RetryPolicyTest.txt"
+        )
+
+        with self.assertRaisesRegex(ValueError, "Java file"):
+            patch.validate_result(proposal, self.make_discovery(), FIXTURE_ROOT)
+
+    def test_rejects_path_different_from_proposed_test_path(self):
+        patch = self.make_patch(path="src/test/java/com/example/OtherTest.java")
+
+        with self.assertRaisesRegex(ValueError, "proposed test path"):
+            patch.validate_result(
+                self.make_proposal(), self.make_discovery(), FIXTURE_ROOT
+            )
+
+    def test_rejects_wrong_or_mixed_junit_imports(self):
+        junit4_content = self.make_patch().proposed_content.replace(
+            "org.junit.jupiter.api.Test",
+            "org.junit.Test",
+        )
+        mixed_content = self.make_patch().proposed_content.replace(
+            "import org.junit.jupiter.api.Test;",
+            "import org.junit.jupiter.api.Test;\nimport org.junit.Test;",
+        )
+
+        for content in (junit4_content, mixed_content):
+            with self.subTest(content=content):
+                with self.assertRaisesRegex(ValueError, "JUnit5"):
+                    self.make_patch(proposed_content=content).validate_result(
+                        self.make_proposal(),
+                        self.make_discovery(),
+                        FIXTURE_ROOT,
+                    )
+
+    def test_rejects_missing_proposed_test_method(self):
+        proposal = self.make_proposal(
+            test_cases=[self.make_test_case(name="stopsAfterMaximumAttempts")]
+        )
+
+        with self.assertRaisesRegex(ValueError, "test names"):
+            self.make_patch().validate_result(
+                proposal, self.make_discovery(), FIXTURE_ROOT
+            )
+
+    def test_rejects_framework_mismatch_between_proposal_and_discovery(self):
+        discovery = self.make_discovery(
+            test_framework=TestFramework.JUNIT4,
+            build_tool=BuildTool.GRADLE,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Framework"):
+            self.make_patch().validate_result(
+                self.make_proposal(), discovery, FIXTURE_ROOT
+            )
+
+    def test_rejects_class_name_different_from_destination_filename(self):
+        content = self.make_patch().proposed_content.replace(
+            "class RetryPolicyTest",
+            "class DifferentTest",
+        )
+
+        with self.assertRaisesRegex(ValueError, "class"):
+            self.make_patch(proposed_content=content).validate_result(
+                self.make_proposal(),
+                self.make_discovery(),
+                FIXTURE_ROOT,
+            )
+
+    def test_create_rejects_existing_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            destination = workspace / "src/test/java/com/example/RetryPolicyTest.java"
+            destination.parent.mkdir(parents=True)
+            destination.touch()
+
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                self.make_patch().validate_result(
+                    self.make_proposal(),
+                    self.make_discovery(),
+                    workspace,
+                )
+
+    def test_accepts_nonexistent_destination_with_string_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.make_patch().validate_result(
+                self.make_proposal(),
+                self.make_discovery(),
+                directory,
+            )
+
+    def test_formats_proposed_patch_for_console(self):
+        patch = self.make_patch()
+
+        output = patch.to_console_string()
+
+        self.assertIn("Proposed Test Patch", output)
+        self.assertIn("Operation: create", output)
+        self.assertIn(
+            "Path: src/test/java/com/example/RetryPolicyTest.java",
+            output,
+        )
+        self.assertIn("Expected Existing Content: None", output)
+        self.assertIn("Applied: False", output)
+        self.assertIn(patch.rationale, output)
+        self.assertIn(patch.proposed_content, output)
 
 
 class ProposedTestCaseTests(unittest.TestCase):

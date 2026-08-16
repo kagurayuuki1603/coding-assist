@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,16 +12,18 @@ from cd_assist.agent import (
     INTERPRETATION_INSTRUCTIONS,
     NEXT_RETRIEVAL_INSTRUCTIONS,
     RETRIEVAL_SELECTION_INSTRUCTIONS,
+    TEST_PATCH_INSTRUCTIONS,
     TEST_PROPOSAL_INSTRUCTIONS,
     analyze_bugs,
     decide_next_retrieval,
     generate_response,
+    get_test_patch,
     init_agent,
     interpret_intention,
     propose_tests,
     select_tool,
 )
-from cd_assist.errors import ModelResponseError
+from cd_assist.errors import AgentResponseError, ModelResponseError
 from cd_assist.models import (
     BugAnalysis,
     BugFinding,
@@ -37,6 +40,8 @@ from cd_assist.models import (
 )
 from cd_assist.test_generation import (
     BuildTool,
+    PatchOperation,
+    ProposedPatch,
     ProposedTestCase,
     TestDiscoveryStatus,
     TestFramework,
@@ -55,6 +60,7 @@ class CodingAssistantAgentTests(unittest.TestCase):
             client,
             FIXTURE_WORKSPACE,
             model_callback,
+            Mock(),
             Mock(),
             Mock(),
             Mock(),
@@ -126,6 +132,7 @@ class CodingAssistantAgentTests(unittest.TestCase):
             Mock(),
             Mock(),
             Mock(),
+            Mock(),
         )
 
         result = agent.interpret_task("Find validation bugs in ExampleService.java")
@@ -155,6 +162,7 @@ class CodingAssistantAgentTests(unittest.TestCase):
             Mock(),
             Mock(),
             selector,
+            Mock(),
             Mock(),
             Mock(),
             Mock(),
@@ -190,6 +198,7 @@ class CodingAssistantAgentTests(unittest.TestCase):
             decider,
             Mock(),
             Mock(),
+            Mock(),
         )
 
         result = agent.determine_next_retrieval(
@@ -221,6 +230,7 @@ class GatherTestGenerationContextTests(unittest.TestCase):
             FIXTURE_WORKSPACE,
             Mock(),
             Mock(return_value=interpretation),
+            Mock(),
             Mock(),
             Mock(),
             Mock(),
@@ -441,12 +451,23 @@ class GenerateTestProposalTests(unittest.TestCase):
         with self.assertRaisesRegex(ModelResponseError, "Could not propose tests"):
             propose_tests(client, self.make_context())
 
-    def test_agent_delegates_and_validates_proposal(self):
+    def test_rejects_contextually_invalid_parsed_proposal(self):
+        context = self.make_context()
+        proposal = self.make_proposal().model_copy(
+            update={"proposed_test_path": "outside/RetryPolicyTest.java"}
+        )
+        client = Mock()
+        client.responses.parse.return_value = SimpleNamespace(output_parsed=proposal)
+
+        with self.assertRaisesRegex(AgentResponseError, "discovered test root"):
+            propose_tests(client, context)
+
+    def test_agent_delegates_proposal_generation(self):
         context = self.make_context()
         proposal = self.make_proposal()
         proposer = Mock(return_value=proposal)
         agent = CodingAssistantAgent(
-            object(), FIXTURE_WORKSPACE, Mock(), Mock(), Mock(), Mock(), Mock(), proposer
+            object(), FIXTURE_WORKSPACE, Mock(), Mock(), Mock(), Mock(), Mock(), proposer, Mock()
         )
         agent.gather_test_generation_context = Mock(return_value=context)
 
@@ -455,18 +476,172 @@ class GenerateTestProposalTests(unittest.TestCase):
         self.assertIs(proposal, result)
         proposer.assert_called_once_with(agent.client, context)
 
-    def test_agent_wraps_invalid_contextual_proposal(self):
-        context = self.make_context()
-        proposal = self.make_proposal().model_copy(
-            update={"proposed_test_path": "outside/RetryPolicyTest.java"}
+class GenerateTestPatchTests(unittest.TestCase):
+    def make_context(self):
+        return TestGenerationContext(
+            request="generate tests for RetryPolicy.java",
+            interpretation=TaskInterpretation(
+                intent=TaskIntent.GENERATE_TESTS,
+                target="RetryPolicy.java",
+                search_terms=["RetryPolicy.java"],
+            ),
+            discovery=TestFrameworkDiscovery(
+                test_framework=TestFramework.JUNIT5,
+                build_tool=BuildTool.MAVEN,
+                source_roots=["src/main/java"],
+                test_roots=["src/test/java"],
+                evidence_paths=["pom.xml"],
+                test_status=TestDiscoveryStatus.DISCOVERED,
+            ),
+            evidence=EvidenceSet(
+                items=[EvidenceItem(
+                    path="RetryPolicy.java",
+                    start_line=1,
+                    content="class RetryPolicy {}",
+                    source=READ_FILE,
+                    truncated=False,
+                )],
+                truncated=False,
+                context_str="Evidence 0: RetryPolicy.java",
+            ),
         )
+
+    def make_proposal(self):
+        return TestProposal(
+            target_path="RetryPolicy.java",
+            proposed_test_path="src/test/java/RetryPolicyTest.java",
+            test_framework=TestFramework.JUNIT5,
+            test_cases=[ProposedTestCase(
+                name="constructsRetryPolicy",
+                behavior="The policy can be constructed.",
+                rationale="This establishes the test fixture.",
+                evidence_indices=[0],
+            )],
+            assumptions=[],
+            insufficient_evidence_reason=None,
+        )
+
+    def make_patch(self, **overrides):
+        values = {
+            "operation": PatchOperation.CREATE,
+            "path": "src/test/java/RetryPolicyTest.java",
+            "expected_existing_content": None,
+            "proposed_content": (
+                "import org.junit.jupiter.api.Test;\n\n"
+                "class RetryPolicyTest {\n"
+                "    @Test void constructsRetryPolicy() {}\n"
+                "}"
+            ),
+            "rationale": "Adds the proposed constructor test.",
+            "applied": False,
+        }
+        values.update(overrides)
+        return ProposedPatch(**values)
+
+    def test_requests_structured_patch_with_context_and_proposal(self):
+        client = Mock()
+        context = self.make_context()
+        proposal = self.make_proposal()
+        test_patch = self.make_patch()
+        client.responses.parse.return_value = SimpleNamespace(output_parsed=test_patch)
+
+        result = get_test_patch(client, proposal, context, FIXTURE_WORKSPACE)
+
+        self.assertIs(test_patch, result)
+        call = client.responses.parse.call_args
+        self.assertIs(ProposedPatch, call.kwargs["text_format"])
+        self.assertEqual(TEST_PATCH_INSTRUCTIONS, call.kwargs["input"][0]["content"])
+        self.assertIn(context.to_console_string(), call.kwargs["input"][1]["content"])
+        self.assertIn(proposal.to_console_string(), call.kwargs["input"][2]["content"])
+
+    def test_rejects_missing_parsed_patch(self):
+        client = Mock()
+        client.responses.parse.return_value = SimpleNamespace(output_parsed=None)
+
+        with self.assertRaisesRegex(ModelResponseError, "valid test patch"):
+            get_test_patch(
+                client, self.make_proposal(), self.make_context(), FIXTURE_WORKSPACE
+            )
+
+    def test_wraps_patch_model_error(self):
+        client = Mock()
+        client.responses.parse.side_effect = OpenAIError("API failed")
+
+        with self.assertRaisesRegex(ModelResponseError, "Could not create test patch"):
+            get_test_patch(
+                client, self.make_proposal(), self.make_context(), FIXTURE_WORKSPACE
+            )
+
+    def test_wraps_contextually_invalid_patch(self):
+        client = Mock()
+        client.responses.parse.return_value = SimpleNamespace(
+            output_parsed=self.make_patch(path="outside/RetryPolicyTest.java")
+        )
+
+        with self.assertRaisesRegex(AgentResponseError, "discovered test root"):
+            get_test_patch(
+                client, self.make_proposal(), self.make_context(), FIXTURE_WORKSPACE
+            )
+
+    def test_agent_orchestrates_context_proposal_and_patch(self):
+        context = self.make_context()
+        proposal = self.make_proposal()
+        test_patch = self.make_patch()
+        proposer = Mock(return_value=proposal)
+        patch_generator = Mock(return_value=test_patch)
         agent = CodingAssistantAgent(
-            object(), FIXTURE_WORKSPACE, Mock(), Mock(), Mock(), Mock(), Mock(), Mock(return_value=proposal)
+            object(), FIXTURE_WORKSPACE, Mock(), Mock(), Mock(), Mock(), Mock(),
+            proposer, patch_generator,
         )
         agent.gather_test_generation_context = Mock(return_value=context)
 
-        with self.assertRaisesRegex(ModelResponseError, "discovered test root"):
-            agent.generate_test_proposal(context.request)
+        result = agent.generate_test_patch(context.request)
+
+        self.assertIs(test_patch, result)
+        proposer.assert_called_once_with(agent.client, context)
+        patch_generator.assert_called_once_with(
+            agent.client, proposal, context, agent.workspace
+        )
+
+    def test_insufficient_proposal_does_not_request_patch(self):
+        context = self.make_context()
+        proposal = self.make_proposal().model_copy(
+            update={
+                "target_path": None,
+                "proposed_test_path": None,
+                "test_framework": TestFramework.UNKNOWN,
+                "test_cases": [],
+                "insufficient_evidence_reason": "The framework is unknown.",
+            }
+        )
+        patch_generator = Mock()
+        agent = CodingAssistantAgent(
+            object(), FIXTURE_WORKSPACE, Mock(), Mock(), Mock(), Mock(), Mock(),
+            Mock(return_value=proposal), patch_generator,
+        )
+        agent.gather_test_generation_context = Mock(return_value=context)
+
+        with self.assertRaisesRegex(AgentResponseError, "Insufficient evidence"):
+            agent.generate_test_patch(context.request)
+
+        patch_generator.assert_not_called()
+
+    def test_agent_patch_flow_does_not_write_repository_files(self):
+        context = self.make_context()
+        proposal = self.make_proposal()
+        test_patch = self.make_patch()
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            agent = CodingAssistantAgent(
+                object(), workspace, Mock(), Mock(), Mock(), Mock(), Mock(),
+                Mock(return_value=proposal), Mock(return_value=test_patch),
+            )
+            agent.gather_test_generation_context = Mock(return_value=context)
+
+            agent.generate_test_patch(context.request)
+
+            self.assertEqual([], list(workspace.iterdir()))
 
 
 class RetrievalEvidenceIntegrationTests(unittest.TestCase):
@@ -501,6 +676,7 @@ class RetrievalEvidenceIntegrationTests(unittest.TestCase):
             interpreter,
             selector,
             decider,
+            Mock(),
             Mock(),
             Mock(),
         )
@@ -560,6 +736,7 @@ class RetrievalEvidenceIntegrationTests(unittest.TestCase):
             Mock(return_value=interpretation),
             Mock(return_value=search_request),
             decider,
+            Mock(),
             Mock(),
             Mock(),
         )
@@ -970,6 +1147,7 @@ class AnalyzeBugsTests(unittest.TestCase):
             Mock(),
             analyzer,
             Mock(),
+            Mock(),
         )
         agent.gather_evidence = Mock(return_value=self.evidence_set)
 
@@ -1002,6 +1180,7 @@ class AnalyzeBugsTests(unittest.TestCase):
             Mock(),
             Mock(),
             Mock(return_value=invalid_analysis),
+            Mock(),
             Mock(),
         )
         agent.gather_evidence = Mock(return_value=self.evidence_set)

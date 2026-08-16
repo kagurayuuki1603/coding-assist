@@ -4,7 +4,7 @@ from typing import Callable
 from openai import OpenAI, OpenAIError
 
 import cd_assist.client as client_config
-from cd_assist.errors import ModelResponseError
+from cd_assist.errors import ModelResponseError, AgentResponseError
 from cd_assist.models import (
     BugAnalysis,
     RetrievalDecision,
@@ -23,8 +23,9 @@ from cd_assist.prompts import (
     NEXT_RETRIEVAL_INSTRUCTIONS,
     RETRIEVAL_SELECTION_INSTRUCTIONS,
     TEST_PROPOSAL_INSTRUCTIONS,
+    TEST_PATCH_INSTRUCTIONS
 )
-from cd_assist.test_generation import TestGenerationContext, TestProposal, discover_test_framework
+from cd_assist.test_generation import TestGenerationContext, TestProposal, discover_test_framework, ProposedPatch
 from cd_assist.tools import read_file
 from cd_assist.retrieval import run_retrieval_loop
 
@@ -38,7 +39,8 @@ def init_agent(workspace, client):
         select_tool=select_tool,
         decide_next_retrieval=decide_next_retrieval,
         analyze_bugs=analyze_bugs,
-        propose_tests=propose_tests
+        propose_tests=propose_tests,
+        get_test_patch=get_test_patch
     )
 
 def interpret_intention(client: OpenAI, user_request: str) -> TaskInterpretation:
@@ -189,13 +191,58 @@ def propose_tests(client: OpenAI, context: TestGenerationContext) -> TestProposa
             f"Could not propose tests: {error}"
         ) from error
 
-    request = response.output_parsed
+    proposal: TestProposal = response.output_parsed
 
-    if request is None:
+    if proposal is None:
         raise ModelResponseError(
             "The model did not return a valid test proposal"
         )
-    return request
+
+    try:
+        proposal.validate_result(context)
+    except ValueError as error:
+        raise AgentResponseError(f"The model did not return a valid test proposal: {error}") from error
+
+    return proposal
+
+def get_test_patch(client: OpenAI, proposal: TestProposal, context: TestGenerationContext, workspace: Path | str) -> ProposedPatch:
+    try:
+        response = client.responses.parse(
+            model=client_config.MODEL_NAME,
+            input=[
+                {
+                    "role": "system",
+                    "content": TEST_PATCH_INSTRUCTIONS,
+                },
+                {
+                    "role": "user",
+                    "content": f"Context: {context.to_console_string()}"
+                },
+                {
+                    "role": "user",
+                    "content": f"Proposal: {proposal.to_console_string()}"
+                },
+            ],
+            text_format=ProposedPatch,
+        )
+    except OpenAIError as error:
+        raise ModelResponseError(
+            f"Could not create test patch: {error}"
+        ) from error
+
+    patch = response.output_parsed
+
+    if patch is None:
+        raise ModelResponseError(
+            "The model did not return a valid test patch"
+        )
+
+    try:
+        patch.validate_result(proposal, context.discovery, workspace)
+    except ValueError as error:
+        raise AgentResponseError(f"The model did not return a valid test patch: {error}") from error
+
+    return patch
 
 def generate_response(client: OpenAI, prompt: str) -> str:
     streamed_text = ""
@@ -229,6 +276,7 @@ class CodingAssistantAgent:
         decide_next_retrieval: Callable[[OpenAI, TaskInterpretation, str], RetrievalDecision],
         analyze_bugs: Callable[[OpenAI, EvidenceSet, str], BugAnalysis],
         propose_tests: Callable[[OpenAI, TestGenerationContext], TestProposal],
+        get_test_patch: Callable[[OpenAI, TestProposal, TestGenerationContext, Path | str], ProposedPatch],
     ):
         self.workspace = workspace
         self.client = client
@@ -238,6 +286,7 @@ class CodingAssistantAgent:
         self.decide_next_retrieval = decide_next_retrieval
         self.analyze_bugs = analyze_bugs
         self.propose_tests = propose_tests
+        self.get_test_patch = get_test_patch
 
     def explain_file(self, requested_path: str) -> str:
         file_result = read_file(self.workspace, requested_path)
@@ -290,7 +339,7 @@ Query: {query}
             initial_request=initial_request,
             decide_next=self.determine_next_retrieval,
         )
-    
+
     def gather_evidence(self, query: str) -> EvidenceSet:
         state = self.gather_retrievals(query)
 
@@ -333,9 +382,16 @@ Query: {query}
 
         proposal: TestProposal = self.propose_tests(self.client, context)
 
-        try:
-            proposal.validate_result(context)
-        except ValueError as error:
-            raise ModelResponseError(f"The model did not return a valid test proposal: {error}") from error
-
         return proposal
+
+    def generate_test_patch(self, query: str) -> ProposedPatch:
+        context: TestGenerationContext = self.gather_test_generation_context(query)
+
+        proposal: TestProposal = self.propose_tests(self.client, context)
+
+        if proposal.insufficient_evidence_reason is not None:
+            raise AgentResponseError("Insufficient evidence for test patch generation.")
+
+        test_patch: ProposedPatch = self.get_test_patch(self.client, proposal, context, self.workspace)
+
+        return test_patch

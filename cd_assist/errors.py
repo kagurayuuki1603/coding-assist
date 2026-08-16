@@ -4,3 +4,7 @@ class ModelResponseError(Exception):
 
 class FileParseError(Exception):
     pass
+
+
+class AgentResponseError(Exception):
+    pass

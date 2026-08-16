@@ -369,21 +369,21 @@ class HandleFindBugCommandTests(unittest.TestCase):
 
 class HandleGenerateTestCommandTests(unittest.TestCase):
     @patch("cd_assist.cli.print_agent_response")
-    def test_generates_and_prints_test_proposal(self, print_agent_response):
-        proposal = Mock()
-        proposal.to_console_string.return_value = "test proposal"
+    def test_generates_and_prints_test_patch(self, print_agent_response):
+        test_patch = Mock()
+        test_patch.to_console_string.return_value = "test patch"
         agent = Mock()
-        agent.generate_test_proposal.return_value = proposal
+        agent.generate_test_patch.return_value = test_patch
 
         handle_generate_test_command(
             "generate tests for RetryPolicy.java",
             agent,
         )
 
-        agent.generate_test_proposal.assert_called_once_with(
+        agent.generate_test_patch.assert_called_once_with(
             "generate tests for RetryPolicy.java"
         )
-        print_agent_response.assert_called_once_with("test proposal")
+        print_agent_response.assert_called_once_with("test patch")
 
     @patch("cd_assist.cli.print_no_query")
     def test_reports_missing_query(self, print_no_query):
@@ -392,18 +392,18 @@ class HandleGenerateTestCommandTests(unittest.TestCase):
         handle_generate_test_command("generate tests", agent)
 
         print_no_query.assert_called_once_with()
-        agent.generate_test_proposal.assert_not_called()
+        agent.generate_test_patch.assert_not_called()
 
     @patch("cd_assist.cli.print_agent_response")
     @patch("cd_assist.cli.print_exception")
-    def test_reports_proposal_generation_error(
+    def test_reports_patch_generation_error(
         self,
         print_exception,
         print_agent_response,
     ):
         agent = Mock()
         error = ModelResponseError("Could not interpret test-generation task")
-        agent.generate_test_proposal.side_effect = error
+        agent.generate_test_patch.side_effect = error
 
         handle_generate_test_command(
             "generate tests for RetryPolicy.java",

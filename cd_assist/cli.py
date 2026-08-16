@@ -3,7 +3,7 @@ import argparse
 from cd_assist.client import init_openai_client
 from cd_assist.agent import CodingAssistantAgent, init_agent
 from cd_assist.context import build_working_context
-from cd_assist.errors import FileParseError, ModelResponseError
+from cd_assist.errors import FileParseError, ModelResponseError, AgentResponseError
 from cd_assist.input_util import (
     should_ask,
     should_exit,
@@ -15,7 +15,7 @@ from cd_assist.input_util import (
     should_retrieve_tool,
 )
 from cd_assist.models import BugAnalysis
-from cd_assist.test_generation import FrameworkDiscoveryError, TestGenerationContext, TestProposal
+from cd_assist.test_generation import FrameworkDiscoveryError, ProposedPatch
 from cd_assist.print import (
     print_agent_response,
     print_exception,
@@ -139,9 +139,9 @@ def handle_generate_test_command(user_input: str, agent: CodingAssistantAgent):
         print_no_query()
         return
     try:
-        test_proposal: TestProposal = agent.generate_test_proposal(user_input.strip())
-        print_agent_response(test_proposal.to_console_string())
-    except (ValueError, ModelResponseError, FrameworkDiscoveryError) as error:
+        test_patch: ProposedPatch = agent.generate_test_patch(user_input.strip())
+        print_agent_response(test_patch.to_console_string())
+    except (ValueError, ModelResponseError, FrameworkDiscoveryError, AgentResponseError) as error:
         print_exception(error)
         return
 

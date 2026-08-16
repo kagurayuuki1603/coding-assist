@@ -528,6 +528,7 @@ class AgentBugEvaluationTests(unittest.TestCase):
                     ),
                     analyze_bugs=analyzer,
                     propose_tests=Mock(),
+                    get_test_patch=Mock(),
                 )
 
                 analysis = agent.find_bugs(scenario.case.request)
