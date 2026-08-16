@@ -361,6 +361,219 @@ class ProposedPatch(BaseModel):
         )
 
 
+class TestClassification(str, Enum):
+    NEW = "new"
+    ALREADY_PRESENT = "already present"
+    PARTIALLY_PRESENT = "partially present"
+    CONFLICTING = "conflicting"
+
+ExistingMethodIdentity = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=2_000
+    )
+]
+
+class TestAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    classification: TestClassification
+    destination_path: str
+    existing_method_identities: list[ExistingMethodIdentity] = Field(max_length=100)
+    missing_test_cases: list[ProposedTestCase] = Field(max_length=100)
+    conflicting_reason: BoundedProposalText | None = None
+
+    @field_validator("destination_path")
+    @classmethod
+    def validate_relative_paths(cls, path: str) -> str :
+        return normalize_relative_path(path)
+
+    @field_validator("existing_method_identities")
+    @classmethod
+    def reject_duplicate_method_identities(cls, identities: list[str]) -> list[str]:
+        if len(identities) != len(set(identities)):
+            raise ValueError("Existing method identities must be unique.")
+
+        return identities
+
+    @model_validator(mode="after")
+    def validate_test_assessment(self):
+
+        if self.classification == TestClassification.CONFLICTING and self.conflicting_reason is None:
+            raise ValueError("Conflicting classification requires a reason.")
+        if self.classification != TestClassification.CONFLICTING and self.conflicting_reason is not None:
+            raise ValueError("Non-conflicting classification should not have a reason.")
+
+        if self.classification == TestClassification.PARTIALLY_PRESENT:
+            if len(self.missing_test_cases) == 0:
+                raise ValueError("Partially present test proposal requires missing tests.")
+            if len(self.existing_method_identities) == 0:
+                raise ValueError("Partially present test proposal requires existing tests.")
+
+        if self.classification == TestClassification.NEW:
+            if len(self.existing_method_identities) > 0:
+                raise ValueError("New test proposal should not have any existing methods.")
+            if len(self.missing_test_cases) == 0:
+                raise ValueError("New test proposal should have missing test cases.")
+
+        if self.classification == TestClassification.ALREADY_PRESENT:
+            if len(self.missing_test_cases) > 0:
+                raise ValueError("Already present test proposal should not have any missing test cases.")
+            if len(self.existing_method_identities) == 0:
+                raise ValueError("Already present test proposal requires existing tests.")
+
+        return self
+
+class ExistingTestInspection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    destination_path: str
+    destination_exists: bool
+    declared_class_name: str | None
+    method_identities: list[ExistingMethodIdentity]
+
+    @field_validator("method_identities")
+    @classmethod
+    def reject_duplicate_method_identities(cls, identities: list[str]) -> list[str]:
+        if len(identities) != len(set(identities)):
+            raise ValueError("Existing method identities must be unique.")
+
+        return identities
+
+
+def inspect_existing_test(workspace: Path | str, destination_path: str) -> ExistingTestInspection:
+    JAVA_CLASS_PATTERN = re.compile(r"\b(?:public\s+)?(?:final\s+|abstract\s+)?class\s+([A-Za-z_$][\w$]*)\b")
+    JAVA_TEST_METHOD_PATTERN = re.compile(
+        r"@Test(?:\s*\([^)]*\))?\s+"
+        r"(?:(?:public|protected|private|static|final|synchronized)\s+)*"
+        r"[A-Za-z_$][\w$<>,.?\[\]]*\s+"
+        r"([A-Za-z_$][\w$]*)\s*\(",
+        re.MULTILINE,
+    )
+
+    workspace_path = Path(workspace).resolve()
+    destination = (workspace_path / destination_path).resolve()
+
+    if not destination.is_relative_to(workspace_path):
+        raise ValueError("Test destination is outside the workspace.")
+
+    if destination.suffix.lower() != ".java":
+        raise ValueError("Test destination must be a Java file.")
+
+    normalized_path = destination.relative_to(workspace_path).as_posix()
+
+    if not destination.exists():
+        return ExistingTestInspection(
+            destination_path=normalized_path,
+            destination_exists=False,
+            declared_class_name=None,
+            method_identities=[],
+        )
+
+    if not destination.is_file():
+        raise ValueError("Test destination is not a file.")
+
+    content = destination.read_text(encoding="utf-8")
+    match = JAVA_CLASS_PATTERN.search(content)
+
+    if match is None:
+        raise ValueError("Existing Java test does not declare a class.")
+
+    declared_class_name = match.group(1)
+
+    if declared_class_name != destination.stem:
+        raise ValueError(
+            "Existing Java class does not match the destination filename."
+        )
+
+    method_identities = JAVA_TEST_METHOD_PATTERN.findall(content)
+
+    return ExistingTestInspection(
+        destination_path=normalized_path,
+        destination_exists=True,
+        declared_class_name=declared_class_name,
+        method_identities=method_identities,
+    )
+
+def classify_test_overlap(proposal: TestProposal, inspection: ExistingTestInspection) -> TestAssessment:
+    if proposal.proposed_test_path is None:
+        raise ValueError("Test proposal requires a destination path.")
+
+    destination_path = proposal.proposed_test_path
+
+    try:
+        inspected_path = normalize_relative_path(inspection.destination_path)
+    except ValueError:
+        return TestAssessment(
+            classification=TestClassification.CONFLICTING,
+            destination_path=destination_path,
+            existing_method_identities=[],
+            missing_test_cases=[],
+            conflicting_reason="Inspected test path is invalid.",
+        )
+
+    if inspected_path != destination_path:
+        return TestAssessment(
+            classification=TestClassification.CONFLICTING,
+            destination_path=destination_path,
+            existing_method_identities=[],
+            missing_test_cases=[],
+            conflicting_reason="Inspected test path does not match the proposed test path.",
+        )
+
+    expected_class_name = PurePosixPath(destination_path).stem
+    if (
+        inspection.destination_exists
+        and inspection.declared_class_name != expected_class_name
+    ):
+        return TestAssessment(
+            classification=TestClassification.CONFLICTING,
+            destination_path=destination_path,
+            existing_method_identities=[],
+            missing_test_cases=[],
+            conflicting_reason="Existing test class does not match the destination filename.",
+        )
+
+    existing_identities = inspection.method_identities
+    if len(existing_identities) != len(set(existing_identities)):
+        return TestAssessment(
+            classification=TestClassification.CONFLICTING,
+            destination_path=destination_path,
+            existing_method_identities=[],
+            missing_test_cases=[],
+            conflicting_reason="Existing test contains ambiguous method identities.",
+        )
+
+    existing = set(existing_identities)
+    present_cases = [
+        test_case
+        for test_case in proposal.test_cases
+        if test_case.name in existing
+    ]
+    missing_cases = [
+        test_case
+        for test_case in proposal.test_cases
+        if test_case.name not in existing
+    ]
+    present_identities = [test_case.name for test_case in present_cases]
+
+    if not present_cases:
+        classification = TestClassification.NEW
+    elif not missing_cases:
+        classification = TestClassification.ALREADY_PRESENT
+    else:
+        classification = TestClassification.PARTIALLY_PRESENT
+
+    return TestAssessment(
+        classification=classification,
+        destination_path=destination_path,
+        existing_method_identities=present_identities,
+        missing_test_cases=missing_cases,
+        conflicting_reason=None,
+    )
+
 def validate_evidence_indices_in_range(
     test_cases: list[ProposedTestCase],
     evidence_set_item_count: int,

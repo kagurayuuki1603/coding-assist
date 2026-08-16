@@ -15,6 +15,7 @@ from cd_assist.agent import (
     TEST_PATCH_INSTRUCTIONS,
     TEST_PROPOSAL_INSTRUCTIONS,
     analyze_bugs,
+    create_proposal_fingerprint,
     decide_next_retrieval,
     generate_response,
     get_test_patch,
@@ -40,9 +41,12 @@ from cd_assist.models import (
 )
 from cd_assist.test_generation import (
     BuildTool,
+    ExistingTestInspection,
     PatchOperation,
     ProposedPatch,
     ProposedTestCase,
+    TestAssessment,
+    TestClassification,
     TestDiscoveryStatus,
     TestFramework,
     TestFrameworkDiscovery,
@@ -506,17 +510,21 @@ class GenerateTestPatchTests(unittest.TestCase):
             ),
         )
 
-    def make_proposal(self):
+    def make_proposal(self, names=None):
+        names = names or ["constructsRetryPolicy"]
         return TestProposal(
             target_path="RetryPolicy.java",
             proposed_test_path="src/test/java/RetryPolicyTest.java",
             test_framework=TestFramework.JUNIT5,
-            test_cases=[ProposedTestCase(
-                name="constructsRetryPolicy",
-                behavior="The policy can be constructed.",
-                rationale="This establishes the test fixture.",
-                evidence_indices=[0],
-            )],
+            test_cases=[
+                ProposedTestCase(
+                    name=name,
+                    behavior=f"Exercises {name}.",
+                    rationale=f"Covers {name}.",
+                    evidence_indices=[0],
+                )
+                for name in names
+            ],
             assumptions=[],
             insufficient_evidence_reason=None,
         )
@@ -642,6 +650,289 @@ class GenerateTestPatchTests(unittest.TestCase):
             agent.generate_test_patch(context.request)
 
             self.assertEqual([], list(workspace.iterdir()))
+
+    def test_proposal_fingerprint_is_stable_for_generated_method_names(self):
+        first = self.make_proposal().model_copy(
+            update={
+                "test_cases": [
+                    ProposedTestCase(
+                        name="secondCase",
+                        behavior="Second behavior.",
+                        rationale="Second rationale.",
+                        evidence_indices=[0],
+                    ),
+                    self.make_proposal().test_cases[0],
+                ]
+            }
+        )
+        second = self.make_proposal().model_copy(
+            update={
+                "test_cases": [
+                    ProposedTestCase(
+                        name="differentlyNamedCase",
+                        behavior="Equivalent generated behavior.",
+                        rationale="Equivalent generated rationale.",
+                        evidence_indices=[0],
+                    )
+                ]
+            }
+        )
+        inspection = ExistingTestInspection(
+            destination_path="src/test/java/RetryPolicyTest.java",
+            destination_exists=False,
+            declared_class_name=None,
+            method_identities=[],
+        )
+
+        self.assertEqual(
+            create_proposal_fingerprint(first, inspection, self.make_context()),
+            create_proposal_fingerprint(second, inspection, self.make_context()),
+        )
+
+    def test_proposal_fingerprint_changes_with_repository_evidence(self):
+        proposal = self.make_proposal()
+        inspection = ExistingTestInspection(
+            destination_path="src/test/java/RetryPolicyTest.java",
+            destination_exists=False,
+            declared_class_name=None,
+            method_identities=[],
+        )
+        original_context = self.make_context()
+        changed_context = self.make_context().model_copy(
+            update={
+                "evidence": EvidenceSet(
+                    items=[EvidenceItem(
+                        path="RetryPolicy.java",
+                        start_line=1,
+                        content="class RetryPolicy { boolean shouldRetry() { return true; } }",
+                        source=READ_FILE,
+                        truncated=False,
+                    )],
+                    truncated=False,
+                    context_str="Evidence 0: RetryPolicy.java",
+                )
+            }
+        )
+
+        self.assertNotEqual(
+            create_proposal_fingerprint(proposal, inspection, original_context),
+            create_proposal_fingerprint(proposal, inspection, changed_context),
+        )
+
+    def test_proposal_fingerprint_changes_with_normalized_request(self):
+        proposal = self.make_proposal()
+        inspection = ExistingTestInspection(
+            destination_path="src/test/java/RetryPolicyTest.java",
+            destination_exists=False,
+            declared_class_name=None,
+            method_identities=[],
+        )
+        original_context = self.make_context()
+        changed_context = original_context.model_copy(
+            update={"request": "generate boundary tests for RetryPolicy.java"}
+        )
+
+        self.assertNotEqual(
+            create_proposal_fingerprint(proposal, inspection, original_context),
+            create_proposal_fingerprint(proposal, inspection, changed_context),
+        )
+
+    def test_proposal_fingerprint_accepts_file_level_evidence(self):
+        proposal = self.make_proposal()
+        inspection = ExistingTestInspection(
+            destination_path="src/test/java/RetryPolicyTest.java",
+            destination_exists=False,
+            declared_class_name=None,
+            method_identities=[],
+        )
+        context = self.make_context().model_copy(
+            update={
+                "evidence": EvidenceSet(
+                    items=[EvidenceItem(
+                        path="pom.xml",
+                        start_line=None,
+                        content="<project />",
+                        source=READ_FILE,
+                        truncated=False,
+                    )],
+                    truncated=False,
+                    context_str="Evidence 0: pom.xml",
+                )
+            }
+        )
+
+        fingerprint = create_proposal_fingerprint(proposal, inspection, context)
+
+        self.assertEqual(64, len(fingerprint))
+
+    def test_repeated_proposal_in_same_agent_does_not_generate_second_patch(self):
+        context = self.make_context()
+        proposal = self.make_proposal()
+        patch_generator = Mock(return_value=self.make_patch())
+        agent = CodingAssistantAgent(
+            object(), FIXTURE_WORKSPACE, Mock(), Mock(), Mock(), Mock(), Mock(),
+            Mock(return_value=proposal), patch_generator,
+        )
+        agent.gather_test_generation_context = Mock(return_value=context)
+
+        agent.generate_test_patch(context.request)
+
+        with self.assertRaisesRegex(AgentResponseError, "already generated"):
+            agent.generate_test_patch(context.request)
+
+        self.assertEqual(1, patch_generator.call_count)
+        self.assertEqual(1, len(agent.proposal_fingerprints))
+
+    def test_failed_patch_generation_does_not_remember_fingerprint(self):
+        context = self.make_context()
+        proposal = self.make_proposal()
+        test_patch = self.make_patch()
+        patch_generator = Mock(
+            side_effect=[ModelResponseError("Patch generation failed"), test_patch]
+        )
+        agent = CodingAssistantAgent(
+            object(), FIXTURE_WORKSPACE, Mock(), Mock(), Mock(), Mock(), Mock(),
+            Mock(return_value=proposal), patch_generator,
+        )
+        agent.gather_test_generation_context = Mock(return_value=context)
+
+        with self.assertRaises(ModelResponseError):
+            agent.generate_test_patch(context.request)
+
+        self.assertEqual(set(), agent.proposal_fingerprints)
+        self.assertIs(test_patch, agent.generate_test_patch(context.request))
+        self.assertEqual(2, patch_generator.call_count)
+
+    def test_proposal_tracking_is_isolated_between_agents(self):
+        context = self.make_context()
+        proposal = self.make_proposal()
+        first_patch_generator = Mock(return_value=self.make_patch())
+        second_patch_generator = Mock(return_value=self.make_patch())
+        first_agent = CodingAssistantAgent(
+            object(), FIXTURE_WORKSPACE, Mock(), Mock(), Mock(), Mock(), Mock(),
+            Mock(return_value=proposal), first_patch_generator,
+        )
+        second_agent = CodingAssistantAgent(
+            object(), FIXTURE_WORKSPACE, Mock(), Mock(), Mock(), Mock(), Mock(),
+            Mock(return_value=proposal), second_patch_generator,
+        )
+        first_agent.gather_test_generation_context = Mock(return_value=context)
+        second_agent.gather_test_generation_context = Mock(return_value=context)
+
+        first_agent.generate_test_patch(context.request)
+        second_agent.generate_test_patch(context.request)
+
+        first_patch_generator.assert_called_once()
+        second_patch_generator.assert_called_once()
+        self.assertIsNot(
+            first_agent.proposal_fingerprints,
+            second_agent.proposal_fingerprints,
+        )
+
+    def test_already_present_proposal_does_not_generate_patch(self):
+        context = self.make_context()
+        proposal = self.make_proposal()
+        patch_generator = Mock()
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            destination = workspace / proposal.proposed_test_path
+            destination.parent.mkdir(parents=True)
+            destination.write_text(
+                "class RetryPolicyTest {\n"
+                "    @Test void constructsRetryPolicy() {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            agent = CodingAssistantAgent(
+                object(), workspace, Mock(), Mock(), Mock(), Mock(), Mock(),
+                Mock(return_value=proposal), patch_generator,
+            )
+            agent.gather_test_generation_context = Mock(return_value=context)
+
+            with self.assertRaisesRegex(AgentResponseError, "already present"):
+                agent.generate_test_patch(context.request)
+
+        patch_generator.assert_not_called()
+        self.assertEqual(set(), agent.proposal_fingerprints)
+
+    def test_partial_overlap_reports_modify_requirement_without_generating_patch(self):
+        context = self.make_context()
+        proposal = self.make_proposal(
+            ["constructsRetryPolicy", "stopsAtMaximumAttempts"]
+        )
+        patch_generator = Mock(return_value=self.make_patch())
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            destination = workspace / proposal.proposed_test_path
+            destination.parent.mkdir(parents=True)
+            destination.write_text(
+                "class RetryPolicyTest {\n"
+                "    @Test void constructsRetryPolicy() {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            agent = CodingAssistantAgent(
+                object(), workspace, Mock(), Mock(), Mock(), Mock(), Mock(),
+                Mock(return_value=proposal), patch_generator,
+            )
+            agent.gather_test_generation_context = Mock(return_value=context)
+
+            with self.assertRaisesRegex(AgentResponseError, "MODIFY patch"):
+                agent.generate_test_patch(context.request)
+
+        patch_generator.assert_not_called()
+
+    def test_existing_destination_without_overlap_does_not_generate_create_patch(self):
+        context = self.make_context()
+        proposal = self.make_proposal(["newRetryBehavior"])
+        patch_generator = Mock()
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            destination = workspace / proposal.proposed_test_path
+            destination.parent.mkdir(parents=True)
+            destination.write_text(
+                "class RetryPolicyTest {\n"
+                "    @Test void unrelatedExistingTest() {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            agent = CodingAssistantAgent(
+                object(), workspace, Mock(), Mock(), Mock(), Mock(), Mock(),
+                Mock(return_value=proposal), patch_generator,
+            )
+            agent.gather_test_generation_context = Mock(return_value=context)
+
+            with self.assertRaisesRegex(AgentResponseError, "MODIFY patch"):
+                agent.generate_test_patch(context.request)
+
+        patch_generator.assert_not_called()
+
+    @patch("cd_assist.agent.classify_test_overlap")
+    def test_conflicting_assessment_does_not_generate_patch(self, classify_overlap):
+        context = self.make_context()
+        proposal = self.make_proposal()
+        patch_generator = Mock()
+        classify_overlap.return_value = TestAssessment(
+            classification=TestClassification.CONFLICTING,
+            destination_path=proposal.proposed_test_path,
+            existing_method_identities=[],
+            missing_test_cases=[],
+            conflicting_reason="Existing test class conflicts with the destination.",
+        )
+        agent = CodingAssistantAgent(
+            object(), FIXTURE_WORKSPACE, Mock(), Mock(), Mock(), Mock(), Mock(),
+            Mock(return_value=proposal), patch_generator,
+        )
+        agent.gather_test_generation_context = Mock(return_value=context)
+
+        with self.assertRaisesRegex(AgentResponseError, "conflicts"):
+            agent.generate_test_patch(context.request)
+
+        patch_generator.assert_not_called()
+        self.assertEqual(set(), agent.proposal_fingerprints)
 
 
 class RetrievalEvidenceIntegrationTests(unittest.TestCase):

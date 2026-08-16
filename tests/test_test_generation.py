@@ -8,11 +8,14 @@ from pydantic import ValidationError
 from cd_assist.models import EvidenceItem, EvidenceSet, READ_FILE, TaskIntent, TaskInterpretation
 from cd_assist.test_generation import (
     BuildTool,
+    ExistingTestInspection,
     FrameworkDiscoveryError,
     MAX_DISCOVERY_EVIDENCE_PATHS,
     PatchOperation,
     ProposedPatch,
     ProposedTestCase,
+    TestAssessment,
+    TestClassification,
     TestDiscoveryStatus,
     TestFramework,
     TestFrameworkDiscovery,
@@ -20,17 +23,370 @@ from cd_assist.test_generation import (
     TestProposal,
     contains_all,
     contains_any,
+    classify_test_overlap,
     discover_build_tool,
     discover_source_roots,
     discover_test_files,
     discover_test_framework,
     discover_test_roots,
     inspect_test_framework_evidence,
+    inspect_existing_test,
     read_discovery_file,
 )
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "discovery"
+
+
+class ExistingTestInspectionTests(unittest.TestCase):
+    def test_reports_missing_destination(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            result = inspect_existing_test(
+                workspace,
+                "src/test/java/com/example/RetryPolicyTest.java",
+            )
+
+        self.assertEqual(
+            "src/test/java/com/example/RetryPolicyTest.java",
+            result.destination_path,
+        )
+        self.assertFalse(result.destination_exists)
+        self.assertIsNone(result.declared_class_name)
+        self.assertEqual([], result.method_identities)
+
+    def test_reads_valid_existing_class(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            destination = (
+                Path(workspace)
+                / "src/test/java/com/example/RetryPolicyTest.java"
+            )
+            destination.parent.mkdir(parents=True)
+            destination.write_text(
+                "package com.example;\n\n"
+                "class RetryPolicyTest {\n"
+                "    @Test\n"
+                "    void retriesTransientFailure() {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            result = inspect_existing_test(
+                workspace,
+                "src/test/java/com/example/RetryPolicyTest.java",
+            )
+
+        self.assertTrue(result.destination_exists)
+        self.assertEqual("RetryPolicyTest", result.declared_class_name)
+        self.assertEqual(
+            ["retriesTransientFailure"],
+            result.method_identities,
+        )
+
+    def test_rejects_class_name_that_does_not_match_filename(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            destination = Path(workspace) / "RetryPolicyTest.java"
+            destination.write_text(
+                "class DifferentTest {}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                inspect_existing_test(workspace, "RetryPolicyTest.java")
+
+    def test_extracts_whitespace_and_multiline_method_declarations(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            destination = Path(workspace) / "RetryPolicyTest.java"
+            destination.write_text(
+                "class RetryPolicyTest {\n"
+                "    @Test\n"
+                "    void\n"
+                "        retriesTransientFailure\n"
+                "        (\n"
+                "        ) {}\n\n"
+                "    @Test\n"
+                "    public final void stopsAtMaximumAttempts () {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            result = inspect_existing_test(workspace, "RetryPolicyTest.java")
+
+        self.assertEqual(
+            ["retriesTransientFailure", "stopsAtMaximumAttempts"],
+            result.method_identities,
+        )
+
+    def test_rejects_duplicate_normalized_method_identities(self):
+        with self.assertRaisesRegex(ValidationError, "must be unique"):
+            ExistingTestInspection(
+                destination_path="RetryPolicyTest.java",
+                destination_exists=True,
+                declared_class_name="RetryPolicyTest",
+                method_identities=[
+                    "retriesTransientFailure",
+                    " retriesTransientFailure ",
+                ],
+            )
+
+
+class TestAssessmentTests(unittest.TestCase):
+    def make_test_case(self, name="retriesTransientFailure"):
+        return ProposedTestCase(
+            name=name,
+            behavior="Retries a transient failure.",
+            rationale="Covers retry behavior.",
+            evidence_indices=[0],
+        )
+
+    def make_assessment(self, **overrides):
+        values = {
+            "classification": TestClassification.NEW,
+            "destination_path": "src/test/java/com/example/RetryPolicyTest.java",
+            "existing_method_identities": [],
+            "missing_test_cases": [self.make_test_case()],
+            "conflicting_reason": None,
+        }
+        values.update(overrides)
+        return TestAssessment(**values)
+
+    def test_accepts_each_consistent_classification(self):
+        cases = (
+            {
+                "classification": TestClassification.NEW,
+            },
+            {
+                "classification": TestClassification.ALREADY_PRESENT,
+                "existing_method_identities": ["retriesTransientFailure"],
+                "missing_test_cases": [],
+            },
+            {
+                "classification": TestClassification.PARTIALLY_PRESENT,
+                "existing_method_identities": ["retriesTransientFailure"],
+                "missing_test_cases": [self.make_test_case("stopsAtMaximumAttempts")],
+            },
+            {
+                "classification": TestClassification.CONFLICTING,
+                "missing_test_cases": [],
+                "conflicting_reason": "The destination class has a different name.",
+            },
+        )
+
+        for values in cases:
+            with self.subTest(classification=values["classification"]):
+                assessment = self.make_assessment(**values)
+
+                self.assertEqual(values["classification"], assessment.classification)
+
+    def test_rejects_inconsistent_classification_state(self):
+        cases = (
+            {
+                "classification": TestClassification.NEW,
+                "existing_method_identities": ["retriesTransientFailure"],
+            },
+            {
+                "classification": TestClassification.NEW,
+                "missing_test_cases": [],
+            },
+            {
+                "classification": TestClassification.ALREADY_PRESENT,
+                "existing_method_identities": [],
+                "missing_test_cases": [],
+            },
+            {
+                "classification": TestClassification.ALREADY_PRESENT,
+                "existing_method_identities": ["retriesTransientFailure"],
+            },
+            {
+                "classification": TestClassification.PARTIALLY_PRESENT,
+                "existing_method_identities": [],
+            },
+            {
+                "classification": TestClassification.PARTIALLY_PRESENT,
+                "existing_method_identities": ["retriesTransientFailure"],
+                "missing_test_cases": [],
+            },
+            {
+                "classification": TestClassification.CONFLICTING,
+                "missing_test_cases": [],
+            },
+            {
+                "classification": TestClassification.NEW,
+                "conflicting_reason": "Unexpected reason.",
+            },
+        )
+
+        for values in cases:
+            with self.subTest(values=values):
+                with self.assertRaises(ValidationError):
+                    self.make_assessment(**values)
+
+    def test_rejects_duplicate_method_identities_after_trimming(self):
+        with self.assertRaisesRegex(ValidationError, "must be unique"):
+            self.make_assessment(
+                classification=TestClassification.ALREADY_PRESENT,
+                existing_method_identities=[
+                    "retriesTransientFailure",
+                    " retriesTransientFailure ",
+                ],
+                missing_test_cases=[],
+            )
+
+    def test_rejects_blank_method_identity(self):
+        with self.assertRaises(ValidationError):
+            self.make_assessment(
+                classification=TestClassification.ALREADY_PRESENT,
+                existing_method_identities=["   "],
+                missing_test_cases=[],
+            )
+
+    def test_normalizes_destination_path(self):
+        assessment = self.make_assessment(
+            destination_path=r"src\test\java\com\example\RetryPolicyTest.java"
+        )
+
+        self.assertEqual(
+            "src/test/java/com/example/RetryPolicyTest.java",
+            assessment.destination_path,
+        )
+
+    def test_rejects_unsafe_destination_path(self):
+        for path in ("/tmp/RetryPolicyTest.java", "../RetryPolicyTest.java"):
+            with self.subTest(path=path):
+                with self.assertRaises(ValidationError):
+                    self.make_assessment(destination_path=path)
+
+
+class ClassifyTestOverlapTests(unittest.TestCase):
+    destination_path = "src/test/java/com/example/RetryPolicyTest.java"
+
+    def make_test_case(self, name):
+        return ProposedTestCase(
+            name=name,
+            behavior=f"Exercises {name}.",
+            rationale=f"Covers {name}.",
+            evidence_indices=[0],
+        )
+
+    def make_proposal(self, names=None):
+        names = names or ["retriesTransientFailure"]
+        return TestProposal(
+            target_path="src/main/java/com/example/RetryPolicy.java",
+            proposed_test_path=self.destination_path,
+            test_framework=TestFramework.JUNIT5,
+            test_cases=[self.make_test_case(name) for name in names],
+            assumptions=[],
+            insufficient_evidence_reason=None,
+        )
+
+    def make_inspection(self, **overrides):
+        values = {
+            "destination_path": self.destination_path,
+            "destination_exists": True,
+            "declared_class_name": "RetryPolicyTest",
+            "method_identities": [],
+        }
+        values.update(overrides)
+        return ExistingTestInspection(**values)
+
+    def test_classifies_missing_destination_as_new(self):
+        proposal = self.make_proposal()
+        inspection = self.make_inspection(
+            destination_exists=False,
+            declared_class_name=None,
+        )
+
+        result = classify_test_overlap(proposal, inspection)
+
+        self.assertEqual(TestClassification.NEW, result.classification)
+        self.assertEqual([], result.existing_method_identities)
+        self.assertEqual(proposal.test_cases, result.missing_test_cases)
+
+    def test_classifies_all_proposed_methods_as_already_present(self):
+        proposal = self.make_proposal(
+            ["retriesTransientFailure", "stopsAtMaximumAttempts"]
+        )
+        inspection = self.make_inspection(
+            method_identities=[
+                "unrelatedExistingTest",
+                "retriesTransientFailure",
+                "stopsAtMaximumAttempts",
+            ]
+        )
+
+        result = classify_test_overlap(proposal, inspection)
+
+        self.assertEqual(TestClassification.ALREADY_PRESENT, result.classification)
+        self.assertEqual(
+            ["retriesTransientFailure", "stopsAtMaximumAttempts"],
+            result.existing_method_identities,
+        )
+        self.assertEqual([], result.missing_test_cases)
+
+    def test_classifies_partial_overlap_and_returns_only_missing_cases(self):
+        proposal = self.make_proposal(
+            ["retriesTransientFailure", "stopsAtMaximumAttempts"]
+        )
+        inspection = self.make_inspection(
+            method_identities=["retriesTransientFailure"]
+        )
+
+        result = classify_test_overlap(proposal, inspection)
+
+        self.assertEqual(TestClassification.PARTIALLY_PRESENT, result.classification)
+        self.assertEqual(
+            ["retriesTransientFailure"],
+            result.existing_method_identities,
+        )
+        self.assertEqual(
+            [proposal.test_cases[1]],
+            result.missing_test_cases,
+        )
+
+    def test_classifies_no_method_overlap_as_new(self):
+        proposal = self.make_proposal()
+        inspection = self.make_inspection(
+            method_identities=["unrelatedExistingTest"]
+        )
+
+        result = classify_test_overlap(proposal, inspection)
+
+        self.assertEqual(TestClassification.NEW, result.classification)
+        self.assertEqual([], result.existing_method_identities)
+        self.assertEqual(proposal.test_cases, result.missing_test_cases)
+
+    def test_classifies_path_mismatch_as_conflicting(self):
+        result = classify_test_overlap(
+            self.make_proposal(),
+            self.make_inspection(destination_path="OtherTest.java"),
+        )
+
+        self.assertEqual(TestClassification.CONFLICTING, result.classification)
+        self.assertIn("path", result.conflicting_reason.lower())
+
+    def test_classifies_class_name_mismatch_as_conflicting(self):
+        result = classify_test_overlap(
+            self.make_proposal(),
+            self.make_inspection(declared_class_name="DifferentTest"),
+        )
+
+        self.assertEqual(TestClassification.CONFLICTING, result.classification)
+        self.assertIn("class", result.conflicting_reason.lower())
+
+    def test_classifies_ambiguous_method_identity_as_conflicting(self):
+        inspection = ExistingTestInspection.model_construct(
+            destination_path=self.destination_path,
+            destination_exists=True,
+            declared_class_name="RetryPolicyTest",
+            method_identities=[
+                "retriesTransientFailure",
+                "retriesTransientFailure",
+            ],
+        )
+
+        result = classify_test_overlap(self.make_proposal(), inspection)
+
+        self.assertEqual(TestClassification.CONFLICTING, result.classification)
+        self.assertIn("ambiguous", result.conflicting_reason.lower())
 
 
 class ProposedPatchTests(unittest.TestCase):

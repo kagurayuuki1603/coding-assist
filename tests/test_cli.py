@@ -10,7 +10,7 @@ from cd_assist.cli import (
     handle_select_tool_command,
     run_app,
 )
-from cd_assist.errors import FileParseError, ModelResponseError
+from cd_assist.errors import AgentResponseError, FileParseError, ModelResponseError
 from cd_assist.models import (
     BugAnalysis,
     BugFinding,
@@ -403,6 +403,67 @@ class HandleGenerateTestCommandTests(unittest.TestCase):
     ):
         agent = Mock()
         error = ModelResponseError("Could not interpret test-generation task")
+        agent.generate_test_patch.side_effect = error
+
+        handle_generate_test_command(
+            "generate tests for RetryPolicy.java",
+            agent,
+        )
+
+        print_exception.assert_called_once_with(error)
+        print_agent_response.assert_not_called()
+
+    @patch("cd_assist.cli.print_agent_response")
+    @patch("cd_assist.cli.print_exception")
+    def test_reports_tests_already_present(
+        self,
+        print_exception,
+        print_agent_response,
+    ):
+        agent = Mock()
+        error = AgentResponseError("The proposed tests are already present.")
+        agent.generate_test_patch.side_effect = error
+
+        handle_generate_test_command(
+            "generate tests for RetryPolicy.java",
+            agent,
+        )
+
+        print_exception.assert_called_once_with(error)
+        print_agent_response.assert_not_called()
+
+    @patch("cd_assist.cli.print_agent_response")
+    @patch("cd_assist.cli.print_exception")
+    def test_reports_same_session_duplicate(
+        self,
+        print_exception,
+        print_agent_response,
+    ):
+        agent = Mock()
+        error = AgentResponseError(
+            "This test proposal was already generated in this session."
+        )
+        agent.generate_test_patch.side_effect = error
+
+        handle_generate_test_command(
+            "generate tests for RetryPolicy.java",
+            agent,
+        )
+
+        print_exception.assert_called_once_with(error)
+        print_agent_response.assert_not_called()
+
+    @patch("cd_assist.cli.print_agent_response")
+    @patch("cd_assist.cli.print_exception")
+    def test_reports_repository_conflict(
+        self,
+        print_exception,
+        print_agent_response,
+    ):
+        agent = Mock()
+        error = AgentResponseError(
+            "Existing test class conflicts with the destination."
+        )
         agent.generate_test_patch.side_effect = error
 
         handle_generate_test_command(

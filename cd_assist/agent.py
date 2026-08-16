@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 from typing import Callable
 
@@ -25,7 +27,16 @@ from cd_assist.prompts import (
     TEST_PROPOSAL_INSTRUCTIONS,
     TEST_PATCH_INSTRUCTIONS
 )
-from cd_assist.test_generation import TestGenerationContext, TestProposal, discover_test_framework, ProposedPatch
+from cd_assist.test_generation import (
+    TestGenerationContext,
+    TestProposal,
+    discover_test_framework,
+    ProposedPatch,
+    inspect_existing_test,
+    classify_test_overlap,
+    ExistingTestInspection,
+    TestClassification
+)
 from cd_assist.tools import read_file
 from cd_assist.retrieval import run_retrieval_loop
 
@@ -264,6 +275,42 @@ def generate_response(client: OpenAI, prompt: str) -> str:
 
     return streamed_text
 
+def create_proposal_fingerprint(
+    proposal: TestProposal,
+    inspection: ExistingTestInspection,
+    context: TestGenerationContext,
+) -> str:
+    normalized_request = " ".join(context.request.lower().split())
+    repository_evidence = sorted(
+        (
+            {
+                "path": item.path,
+                "start_line": item.start_line,
+                "content": item.content,
+                "truncated": item.truncated,
+            }
+            for item in context.evidence.items
+        ),
+        key=lambda item: (
+            item["path"],
+            -1 if item["start_line"] is None else item["start_line"],
+        ),
+    )
+    payload = {
+        "request": normalized_request,
+        "destination_path": proposal.proposed_test_path,
+        "test_framework": proposal.test_framework.value,
+        "existing_method_identities": sorted(inspection.method_identities),
+        "repository_evidence": repository_evidence,
+    }
+
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 class CodingAssistantAgent:
     def __init__(
@@ -280,6 +327,7 @@ class CodingAssistantAgent:
     ):
         self.workspace = workspace
         self.client = client
+        self.proposal_fingerprints: set[str] = set()
         self.generate_response = generate_response
         self.interpret_intention = interpret_intention
         self.select_tool = select_tool
@@ -287,6 +335,12 @@ class CodingAssistantAgent:
         self.analyze_bugs = analyze_bugs
         self.propose_tests = propose_tests
         self.get_test_patch = get_test_patch
+
+    def has_proposal_fingerprint(self, fingerprint: str) -> bool:
+        return fingerprint in self.proposal_fingerprints
+
+    def remember_proposal_fingerprint(self, fingerprint: str) -> None:
+        self.proposal_fingerprints.add(fingerprint)
 
     def explain_file(self, requested_path: str) -> str:
         file_result = read_file(self.workspace, requested_path)
@@ -392,6 +446,42 @@ Query: {query}
         if proposal.insufficient_evidence_reason is not None:
             raise AgentResponseError("Insufficient evidence for test patch generation.")
 
-        test_patch: ProposedPatch = self.get_test_patch(self.client, proposal, context, self.workspace)
+        inspection: ExistingTestInspection = inspect_existing_test(self.workspace, proposal.proposed_test_path)
+
+        assessment = classify_test_overlap(proposal, inspection)
+
+        if assessment.classification == TestClassification.CONFLICTING:
+            raise AgentResponseError(assessment.conflicting_reason)
+        elif assessment.classification == TestClassification.ALREADY_PRESENT:
+            raise AgentResponseError("The proposed tests are already present.")
+
+        if inspection.destination_exists:
+            missing_names = ", ".join(
+                test_case.name for test_case in assessment.missing_test_cases
+            )
+            raise AgentResponseError(
+                "The existing test file requires a MODIFY patch for missing tests: "
+                f"{missing_names}."
+            )
+
+        proposal_for_patch = proposal
+
+        fingerprint = create_proposal_fingerprint(
+            proposal_for_patch,
+            inspection,
+            context,
+        )
+
+        if self.has_proposal_fingerprint(fingerprint):
+            raise AgentResponseError("This test proposal was already generated in this session.")
+
+        test_patch: ProposedPatch = self.get_test_patch(
+            self.client,
+            proposal_for_patch,
+            context,
+            self.workspace,
+        )
+
+        self.remember_proposal_fingerprint(fingerprint)
 
         return test_patch
