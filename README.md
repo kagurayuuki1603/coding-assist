@@ -42,7 +42,31 @@ This project deliberately focuses on reliability and security:
 
 ## Current Status
 
-Not yet implemented.
+v0.4 is complete through v0.4.7. The assistant now supports read-only Java
+repository exploration, evidence-backed bug analysis, and test generation as
+validated, unapplied patches.
+
+Current capabilities include:
+
+- interactive Java-file explanation and repository questions
+- natural-language task interpretation
+- bounded, model-directed `read_file` and `search_files` retrieval
+- attributed evidence sets and structured bug findings
+- deterministic Maven and Gradle test-framework discovery
+- structured test proposals with framework and evidence validation
+- validated CREATE patches for new Java test files
+- repository-aware detection of existing test classes and methods
+- classification of test overlap as new, already present, partially present,
+  or conflicting
+- same-session suppression of repeated test proposals
+- explicit reporting of missing tests when the destination already exists
+- workspace-boundary, traversal, file-type, UTF-8, and output-size protections
+- fixture-based coverage of the complete request-to-proposed-patch flow
+
+v0.4 remains read-only: proposed test patches are printed with
+`Applied: False` and are never written to the target repository. Existing test
+files requiring additional methods are reported as partial overlap; generating
+a MODIFY patch begins in v0.5.
 
 The intended tool surface is:
 
@@ -109,30 +133,50 @@ Keep these two kinds of state separate:
 
 Conversation history alone is not enough to make a coding agent reliable after a failure or context reset.
 
-## Suggested CLI Shape
+## Run the CLI
 
-The exact interface can evolve, but a simple starting point is:
+Create a `.env` file containing `OPENAI_API_KEY` and `OPENAI_MODEL`, then run:
 
 ```bash
-python3 -m coding_assistant.cli --workspace path/to/java/project
+python3 -m cd_assist.cli --workspace path/to/java/project
 ```
 
-Example interactive commands:
+Available interactive commands include:
 
 ```text
 explain src/main/java/com/example/UserService.java
+ask UserService
+interpret generate tests for UserService.java
+select generate tests for UserService.java
+retrieve generate tests for UserService.java
 find bugs in src/main/java/com/example/UserService.java
 generate tests for src/main/java/com/example/UserService.java
-refactor src/main/java/com/example/UserService.java
-state
-history
 exit
 ```
+
+To exercise the v0.4 vertical-slice fixture:
+
+```bash
+python3 -m cd_assist.cli \
+  --workspace tests/fixtures/test_generation_vertical
+```
+
+Then enter:
+
+```text
+generate tests for src/main/java/com/example/RetryPolicy.java
+generate tests for src/main/java/com/example/RetryPolicy.java
+exit
+```
+
+The first request prints a validated, unapplied CREATE proposal. Repeating the
+same request in that CLI session reports that the proposal was already
+generated. Neither request writes a test file.
 
 Run the project's tests:
 
 ```bash
-python3 -m unittest discover
+python3 -m unittest discover -v
 ```
 
 ## Tool Design
@@ -238,10 +282,10 @@ The application should enforce:
 
 ## Project Roadmap
 
-- v0.1 - Read and explain a Java file.
-- v0.2 - Search repository files and build working context.
-- v0.3 - Find likely bugs with evidence.
-- v0.4 - Generate tests as proposed patches.
+- v0.1 - Read and explain a Java file. Complete.
+- v0.2 - Search repository files and build working context. Complete.
+- v0.3 - Find likely bugs with evidence. Complete.
+- v0.4 - Generate tests as proposed patches. Complete.
 - v0.5 - Refactor code through controlled writes.
 - v0.6 - Add write permissions and approval policy.
 - v0.7 - Add idempotency for write operations.
