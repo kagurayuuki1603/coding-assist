@@ -489,9 +489,196 @@ class ProposedPatchTests(unittest.TestCase):
                     with self.assertRaises(ValidationError):
                         self.make_patch(**{field_name: invalid_text})
 
-    def test_rejects_unsupported_modify_operation(self):
-        with self.assertRaises(ValidationError):
-            self.make_patch(operation="modify")
+    def test_rejects_markdown_fenced_proposed_content(self):
+        for content in (
+            "```java\nclass RetryPolicyTest {}\n```",
+            "```\nclass RetryPolicyTest {}\n```",
+        ):
+            with self.subTest(content=content):
+                with self.assertRaisesRegex(ValidationError, "Markdown fences"):
+                    self.make_patch(proposed_content=content)
+
+    def test_modify_requires_expected_existing_content(self):
+        with self.assertRaisesRegex(ValueError, "must have existing content"):
+            self.make_patch(
+                operation=PatchOperation.MODIFY,
+                expected_existing_content=None,
+            )
+
+    def test_accepts_modify_patch_for_existing_java_test(self):
+        existing_content = (
+            "package com.example;\n\n"
+            "import org.junit.jupiter.api.Test;\n\n"
+            "class RetryPolicyTest {\n}\n"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            destination = workspace / "src/test/java/com/example/RetryPolicyTest.java"
+            destination.parent.mkdir(parents=True)
+            destination.write_text(existing_content, encoding="utf-8")
+
+            patch = self.make_patch(
+                operation=PatchOperation.MODIFY,
+                expected_existing_content=existing_content,
+            )
+
+            patch.validate_result(
+                self.make_proposal(),
+                self.make_discovery(),
+                workspace,
+            )
+
+            self.assertEqual(PatchOperation.MODIFY, patch.operation)
+            self.assertFalse(patch.applied)
+
+    def test_modify_rejects_removed_existing_test_method(self):
+        existing_content = (
+            "package com.example;\n\n"
+            "import org.junit.jupiter.api.Test;\n\n"
+            "class RetryPolicyTest {\n"
+            "    @Test\n"
+            "    void existingBehavior() {\n"
+            "        int value = 1;\n"
+            "    }\n"
+            "}\n"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            destination = workspace / "src/test/java/com/example/RetryPolicyTest.java"
+            destination.parent.mkdir(parents=True)
+            destination.write_text(existing_content, encoding="utf-8")
+
+            patch = self.make_patch(
+                operation=PatchOperation.MODIFY,
+                expected_existing_content=existing_content,
+            )
+
+            with self.assertRaisesRegex(ValueError, "existingBehavior"):
+                patch.validate_result(
+                    self.make_proposal(),
+                    self.make_discovery(),
+                    workspace,
+                )
+
+    def test_modify_rejects_changed_existing_test_method_body(self):
+        existing_method = (
+            "@Test\n"
+            "    void existingBehavior() {\n"
+            "        String brace = \"}\";\n"
+            "        int value = 1;\n"
+            "    }"
+        )
+        existing_content = (
+            "package com.example;\n\n"
+            "import org.junit.jupiter.api.Test;\n\n"
+            "class RetryPolicyTest {\n"
+            f"    {existing_method}\n"
+            "}\n"
+        )
+        proposed_content = self.make_patch().proposed_content.replace(
+            "class RetryPolicyTest {\n",
+            "class RetryPolicyTest {\n"
+            "    @Test\n"
+            "    void existingBehavior() {\n"
+            "        String brace = \"}\";\n"
+            "        int value = 2;\n"
+            "    }\n",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            destination = workspace / "src/test/java/com/example/RetryPolicyTest.java"
+            destination.parent.mkdir(parents=True)
+            destination.write_text(existing_content, encoding="utf-8")
+
+            patch = self.make_patch(
+                operation=PatchOperation.MODIFY,
+                expected_existing_content=existing_content,
+                proposed_content=proposed_content,
+            )
+
+            with self.assertRaisesRegex(ValueError, "existingBehavior"):
+                patch.validate_result(
+                    self.make_proposal(),
+                    self.make_discovery(),
+                    workspace,
+                )
+
+    def test_modify_rejects_missing_destination(self):
+        patch = self.make_patch(
+            operation=PatchOperation.MODIFY,
+            expected_existing_content="class RetryPolicyTest {}",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                patch.validate_result(
+                    self.make_proposal(),
+                    self.make_discovery(),
+                    directory,
+                )
+
+    def test_modify_rejects_stale_expected_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            destination = workspace / "src/test/java/com/example/RetryPolicyTest.java"
+            destination.parent.mkdir(parents=True)
+            destination.write_text("class RetryPolicyTest {}", encoding="utf-8")
+
+            patch = self.make_patch(
+                operation=PatchOperation.MODIFY,
+                expected_existing_content="class RetryPolicyTest { /* old */ }",
+            )
+
+            with self.assertRaisesRegex(ValueError, "content has changed"):
+                patch.validate_result(
+                    self.make_proposal(),
+                    self.make_discovery(),
+                    workspace,
+                )
+
+    def test_modify_rejects_unchanged_proposed_content(self):
+        content = self.make_patch().proposed_content
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            destination = workspace / "src/test/java/com/example/RetryPolicyTest.java"
+            destination.parent.mkdir(parents=True)
+            destination.write_text(content, encoding="utf-8")
+
+            patch = self.make_patch(
+                operation=PatchOperation.MODIFY,
+                expected_existing_content=content,
+                proposed_content=content,
+            )
+
+            with self.assertRaisesRegex(ValueError, "should be different"):
+                patch.validate_result(
+                    self.make_proposal(),
+                    self.make_discovery(),
+                    workspace,
+                )
+
+    def test_modify_rejects_unsupported_extension(self):
+        path = "src/test/java/com/example/RetryPolicyTest.txt"
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            destination = workspace / path
+            destination.parent.mkdir(parents=True)
+            destination.write_text("existing", encoding="utf-8")
+
+            patch = self.make_patch(
+                operation=PatchOperation.MODIFY,
+                path=path,
+                expected_existing_content="existing",
+            )
+            proposal = self.make_proposal(proposed_test_path=path)
+
+            with self.assertRaisesRegex(ValueError, "Unsupported file type"):
+                patch.validate_result(proposal, self.make_discovery(), workspace)
 
     def test_rejects_extra_fields(self):
         with self.assertRaises(ValidationError):

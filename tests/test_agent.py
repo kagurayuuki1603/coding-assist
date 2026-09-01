@@ -562,6 +562,50 @@ class GenerateTestPatchTests(unittest.TestCase):
         self.assertIn(context.to_console_string(), call.kwargs["input"][1]["content"])
         self.assertIn(proposal.to_console_string(), call.kwargs["input"][2]["content"])
 
+    def test_modify_request_supplies_exact_existing_destination_content(self):
+        client = Mock()
+        context = self.make_context()
+        proposal = self.make_proposal()
+        existing_content = (
+            "import org.junit.jupiter.api.Test;\n\n"
+            "class RetryPolicyTest {\n}\n"
+        )
+        modified_content = (
+            "import org.junit.jupiter.api.Test;\n\n"
+            "class RetryPolicyTest {\n"
+            "    @Test void constructsRetryPolicy() {}\n"
+            "}\n"
+        )
+        test_patch = self.make_patch(
+            operation=PatchOperation.MODIFY,
+            expected_existing_content=existing_content,
+            proposed_content=modified_content,
+        )
+        client.responses.parse.return_value = SimpleNamespace(
+            output_parsed=test_patch
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            destination = workspace / proposal.proposed_test_path
+            destination.parent.mkdir(parents=True)
+            destination.write_text(existing_content, encoding="utf-8")
+
+            result = get_test_patch(
+                client,
+                proposal,
+                context,
+                workspace,
+                existing_content,
+            )
+
+        self.assertIs(test_patch, result)
+        model_input = client.responses.parse.call_args.kwargs["input"]
+        self.assertEqual(4, len(model_input))
+        self.assertIn(existing_content, model_input[3]["content"])
+        self.assertIn("<existing_destination>", model_input[3]["content"])
+        self.assertIn("</existing_destination>", model_input[3]["content"])
+
     def test_rejects_missing_parsed_patch(self):
         client = Mock()
         client.responses.parse.return_value = SimpleNamespace(output_parsed=None)
@@ -608,7 +652,7 @@ class GenerateTestPatchTests(unittest.TestCase):
         self.assertIs(test_patch, result)
         proposer.assert_called_once_with(agent.client, context)
         patch_generator.assert_called_once_with(
-            agent.client, proposal, context, agent.workspace
+            agent.client, proposal, context, agent.workspace, None
         )
 
     def test_insufficient_proposal_does_not_request_patch(self):
@@ -856,59 +900,73 @@ class GenerateTestPatchTests(unittest.TestCase):
         patch_generator.assert_not_called()
         self.assertEqual(set(), agent.proposal_fingerprints)
 
-    def test_partial_overlap_reports_modify_requirement_without_generating_patch(self):
+    def test_partial_overlap_generates_modify_patch_for_only_missing_tests(self):
         context = self.make_context()
         proposal = self.make_proposal(
             ["constructsRetryPolicy", "stopsAtMaximumAttempts"]
         )
-        patch_generator = Mock(return_value=self.make_patch())
+        test_patch = self.make_patch()
+        patch_generator = Mock(return_value=test_patch)
 
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             destination = workspace / proposal.proposed_test_path
             destination.parent.mkdir(parents=True)
-            destination.write_text(
+            existing_content = (
                 "class RetryPolicyTest {\n"
                 "    @Test void constructsRetryPolicy() {}\n"
-                "}\n",
-                encoding="utf-8",
+                "}\n"
             )
+            destination.write_text(existing_content, encoding="utf-8")
             agent = CodingAssistantAgent(
                 object(), workspace, Mock(), Mock(), Mock(), Mock(), Mock(),
                 Mock(return_value=proposal), patch_generator,
             )
             agent.gather_test_generation_context = Mock(return_value=context)
 
-            with self.assertRaisesRegex(AgentResponseError, "MODIFY patch"):
-                agent.generate_test_patch(context.request)
+            result = agent.generate_test_patch(context.request)
 
-        patch_generator.assert_not_called()
+        self.assertIs(test_patch, result)
+        patch_generator.assert_called_once()
+        patch_proposal = patch_generator.call_args.args[1]
+        self.assertEqual(
+            ["stopsAtMaximumAttempts"],
+            [test_case.name for test_case in patch_proposal.test_cases],
+        )
+        self.assertEqual(existing_content, patch_generator.call_args.args[4])
 
-    def test_existing_destination_without_overlap_does_not_generate_create_patch(self):
+    def test_existing_destination_without_overlap_generates_modify_patch(self):
         context = self.make_context()
         proposal = self.make_proposal(["newRetryBehavior"])
-        patch_generator = Mock()
+        test_patch = self.make_patch()
+        patch_generator = Mock(return_value=test_patch)
 
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             destination = workspace / proposal.proposed_test_path
             destination.parent.mkdir(parents=True)
-            destination.write_text(
+            existing_content = (
                 "class RetryPolicyTest {\n"
                 "    @Test void unrelatedExistingTest() {}\n"
-                "}\n",
-                encoding="utf-8",
+                "}\n"
             )
+            destination.write_text(existing_content, encoding="utf-8")
             agent = CodingAssistantAgent(
                 object(), workspace, Mock(), Mock(), Mock(), Mock(), Mock(),
                 Mock(return_value=proposal), patch_generator,
             )
             agent.gather_test_generation_context = Mock(return_value=context)
 
-            with self.assertRaisesRegex(AgentResponseError, "MODIFY patch"):
-                agent.generate_test_patch(context.request)
+            result = agent.generate_test_patch(context.request)
 
-        patch_generator.assert_not_called()
+        self.assertIs(test_patch, result)
+        patch_generator.assert_called_once_with(
+            agent.client,
+            proposal,
+            context,
+            workspace,
+            existing_content,
+        )
 
     @patch("cd_assist.agent.classify_test_overlap")
     def test_conflicting_assessment_does_not_generate_patch(self, classify_overlap):

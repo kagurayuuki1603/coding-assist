@@ -46,6 +46,11 @@ class TestPatchInstructionsTests(unittest.TestCase):
     def test_requires_read_only_evidence_bound_junit_patch(self):
         for requirement in (
             'operation: "create"',
+            '"modify"',
+            "complete exact",
+            "not a diff or fragment",
+            "add only the missing test cases",
+            "do not duplicate, rename, remove, or alter existing test methods",
             "Do not apply the patch",
             "JUnit 4",
             "JUnit 5",

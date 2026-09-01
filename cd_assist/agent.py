@@ -35,7 +35,8 @@ from cd_assist.test_generation import (
     inspect_existing_test,
     classify_test_overlap,
     ExistingTestInspection,
-    TestClassification
+    TestClassification,
+    read_workspace_file_exact
 )
 from cd_assist.tools import read_file
 from cd_assist.retrieval import run_retrieval_loop
@@ -216,24 +217,39 @@ def propose_tests(client: OpenAI, context: TestGenerationContext) -> TestProposa
 
     return proposal
 
-def get_test_patch(client: OpenAI, proposal: TestProposal, context: TestGenerationContext, workspace: Path | str) -> ProposedPatch:
+def get_test_patch(client: OpenAI, proposal: TestProposal, context: TestGenerationContext, workspace: Path | str, existing_test_content: str | None = None) -> ProposedPatch:
+    agent_input = [
+        {
+            "role": "system",
+            "content": TEST_PATCH_INSTRUCTIONS,
+        },
+        {
+            "role": "user",
+            "content": f"Context: {context.to_console_string()}"
+        },
+        {
+            "role": "user",
+            "content": f"Proposal: {proposal.to_console_string()}"
+        },
+    ]
+    
+    if existing_test_content is not None:
+        agent_input.append(
+            {
+                "role": "user",
+                "content": (
+                    "Exact existing destination content:\n"
+                    "<existing_destination>\n"
+                    f"{existing_test_content}\n"
+                    "</existing_destination>"
+                ),
+            }
+        )
+
     try:
         response = client.responses.parse(
             model=client_config.MODEL_NAME,
-            input=[
-                {
-                    "role": "system",
-                    "content": TEST_PATCH_INSTRUCTIONS,
-                },
-                {
-                    "role": "user",
-                    "content": f"Context: {context.to_console_string()}"
-                },
-                {
-                    "role": "user",
-                    "content": f"Proposal: {proposal.to_console_string()}"
-                },
-            ],
+            input=agent_input,
             text_format=ProposedPatch,
         )
     except OpenAIError as error:
@@ -455,16 +471,23 @@ Query: {query}
         elif assessment.classification == TestClassification.ALREADY_PRESENT:
             raise AgentResponseError("The proposed tests are already present.")
 
-        if inspection.destination_exists:
-            missing_names = ", ".join(
-                test_case.name for test_case in assessment.missing_test_cases
-            )
-            raise AgentResponseError(
-                "The existing test file requires a MODIFY patch for missing tests: "
-                f"{missing_names}."
+        existing_test_content = None
+        proposal_for_patch = None
+        if inspection.destination_exists: # modify
+            existing_test_content = read_workspace_file_exact(
+                self.workspace,
+                proposal.proposed_test_path,
+                allowed_extensions={".java"},
+                max_bytes=100_000,
             )
 
-        proposal_for_patch = proposal
+            proposal_for_patch = proposal.model_copy(
+                update={
+                    "test_cases": assessment.missing_test_cases,
+                }
+            )
+        else: # create
+            proposal_for_patch = proposal
 
         fingerprint = create_proposal_fingerprint(
             proposal_for_patch,
@@ -480,6 +503,7 @@ Query: {query}
             proposal_for_patch,
             context,
             self.workspace,
+            existing_test_content
         )
 
         self.remember_proposal_fingerprint(fingerprint)

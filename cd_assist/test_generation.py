@@ -255,7 +255,7 @@ class TestProposal(BaseModel):
 
 class PatchOperation(str, Enum):
     CREATE = "create"
-    # MODIFY = "modify"
+    MODIFY = "modify"
 
 BoundedPatchText = Annotated[
     str,
@@ -281,13 +281,22 @@ class ProposedPatch(BaseModel):
         if self.operation == PatchOperation.CREATE:
             if self.expected_existing_content is not None:
                 raise ValueError("CREATE patch should not have any existing content.")
+        if self.operation == PatchOperation.MODIFY:
+            if not self.expected_existing_content:
+                raise ValueError("MODIFY patch must have existing content.")
         return self
-
 
     @field_validator("path")
     @classmethod
     def validate_relative_paths(cls, path: str) -> str :
         return normalize_relative_path(path)
+
+    @field_validator("proposed_content")
+    @classmethod
+    def reject_markdown_fences(cls, content: str) -> str:
+        if "```" in content:
+            raise ValueError("Proposed content must not contain Markdown fences.")
+        return content
 
     def validate_result(self, test_proposal: TestProposal, test_discovery: TestFrameworkDiscovery, workspace: Path | str):
         if test_proposal.test_framework != test_discovery.test_framework:
@@ -295,16 +304,38 @@ class ProposedPatch(BaseModel):
 
         validate_path_under_test_root(self.path, test_discovery.test_roots)
 
+        workspace = Path(workspace).resolve()
+        destination = (workspace / self.path).resolve()
+
+        if not destination.is_relative_to(workspace):
+            raise ValueError("Patch destination is outside the workspace.")
+
         # check that destination does not exist for CREATE
-        if self.operation == PatchOperation.CREATE:
-            workspace = Path(workspace).resolve()
-            destination = (workspace / self.path).resolve()
+        if self.operation == PatchOperation.CREATE and destination.exists():
+            raise ValueError("CREATE patch destination already exists.")
+        elif self.operation == PatchOperation.MODIFY:
+            if not destination.exists():
+                raise ValueError("MODIFY patch destination does not exist.")
 
-            if not destination.is_relative_to(workspace):
-                raise ValueError("Patch destination is outside the workspace.")
+            current_content = read_workspace_file_exact(
+                workspace,
+                self.path,
+                allowed_extensions={".java"},
+                max_bytes=100_000,
+            )
 
-            if destination.exists():
-                raise ValueError("CREATE patch destination already exists.")
+            if current_content != self.expected_existing_content:
+                raise ValueError("File content has changed since the patch was generated.")
+
+            if self.proposed_content == self.expected_existing_content:
+                raise ValueError("Proposed content should be different from the existing content.")
+
+            existing_test_methods = extract_java_test_method_sources(current_content)
+            for method_name, method_source in existing_test_methods.items():
+                if method_source not in self.proposed_content:
+                    raise ValueError(
+                        f"MODIFY patch changes or removes existing test method: {method_name}."
+                    )
 
         # validate that destination ends with .java
         path_parsed = PurePosixPath(self.path)
@@ -496,6 +527,72 @@ def inspect_existing_test(workspace: Path | str, destination_path: str) -> Exist
         declared_class_name=declared_class_name,
         method_identities=method_identities,
     )
+
+
+def extract_java_test_method_sources(content: str) -> dict[str, str]:
+    method_pattern = re.compile(
+        r"@Test(?:\s*\([^)]*\))?\s+"
+        r"(?:(?:public|protected|private|static|final|synchronized)\s+)*"
+        r"[A-Za-z_$][\w$<>,.?\[\]]*\s+"
+        r"([A-Za-z_$][\w$]*)\s*\([^)]*\)"
+        r"(?:\s+throws\s+[^\{]+)?\s*\{",
+        re.MULTILINE,
+    )
+    methods: dict[str, str] = {}
+
+    for match in method_pattern.finditer(content):
+        method_name = match.group(1)
+        if method_name in methods:
+            raise ValueError(f"Existing test method identity is ambiguous: {method_name}.")
+
+        opening_brace = match.end() - 1
+        closing_brace = find_matching_java_brace(content, opening_brace)
+        methods[method_name] = content[match.start():closing_brace + 1]
+
+    return methods
+
+
+def find_matching_java_brace(content: str, opening_brace: int) -> int:
+    depth = 0
+    index = opening_brace
+    state = "code"
+    quote = ""
+
+    while index < len(content):
+        char = content[index]
+        following = content[index + 1] if index + 1 < len(content) else ""
+
+        if state == "line_comment":
+            if char in "\r\n":
+                state = "code"
+        elif state == "block_comment":
+            if char == "*" and following == "/":
+                state = "code"
+                index += 1
+        elif state == "string":
+            if char == "\\":
+                index += 1
+            elif char == quote:
+                state = "code"
+        elif char == "/" and following == "/":
+            state = "line_comment"
+            index += 1
+        elif char == "/" and following == "*":
+            state = "block_comment"
+            index += 1
+        elif char in {'"', "'"}:
+            state = "string"
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+
+        index += 1
+
+    raise ValueError("Existing test method has unmatched braces.")
 
 def classify_test_overlap(proposal: TestProposal, inspection: ExistingTestInspection) -> TestAssessment:
     if proposal.proposed_test_path is None:
@@ -845,3 +942,77 @@ def discover_test_framework(workspace_input: Path | str) -> TestFrameworkDiscove
         test_status=test_discovery_status,
         test_reason=test_reason
     )
+
+def read_workspace_file_exact(
+    workspace: str | Path,
+    requested_path: str,
+    *,
+    allowed_extensions: set[str] | None = None,
+    max_bytes: int = 100_000,
+) -> str:
+    """
+    Read a complete UTF-8 file contained within a workspace.
+
+    Unlike the model-facing read_file() tool, this function never truncates
+    content. Files larger than max_bytes are rejected.
+    """
+    if not isinstance(requested_path, str) or not requested_path.strip():
+        raise ValueError("File path must be a non-empty string.")
+
+    if max_bytes <= 0:
+        raise ValueError("Maximum file size must be positive.")
+
+    requested_path = requested_path.strip().replace("\\", "/")
+
+    if (
+        PurePosixPath(requested_path).is_absolute()
+        or PureWindowsPath(requested_path).is_absolute()
+        or ".." in PurePosixPath(requested_path).parts
+    ):
+        raise ValueError("File path must be relative to the workspace.")
+
+    workspace_path = Path(workspace).resolve()
+
+    if not workspace_path.is_dir():
+        raise ValueError("Workspace does not exist or is not a directory.")
+
+    file_path = (workspace_path / requested_path).resolve()
+
+    if not file_path.is_relative_to(workspace_path):
+        raise ValueError("File is outside the workspace.")
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"File does not exist: {requested_path}")
+
+    if not file_path.is_file():
+        raise ValueError(f"Path is not a file: {requested_path}")
+
+    if allowed_extensions is not None:
+        normalized_extensions = {
+            extension.lower()
+            if extension.startswith(".")
+            else f".{extension.lower()}"
+            for extension in allowed_extensions
+        }
+
+        if file_path.suffix.lower() not in normalized_extensions:
+            raise ValueError(
+                f"Unsupported file type: {file_path.suffix or '(none)'}"
+            )
+
+    file_size = file_path.stat().st_size
+
+    if file_size > max_bytes:
+        raise ValueError(
+            f"File exceeds the maximum size of {max_bytes} bytes."
+        )
+
+    try:
+        # newline="" preserves the file's original line endings. This matters
+        # when the content is used as an exact MODIFY precondition.
+        with file_path.open("r", encoding="utf-8", newline="") as file:
+            return file.read()
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            f"File is not valid UTF-8: {requested_path}"
+        ) from error

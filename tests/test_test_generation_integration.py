@@ -28,6 +28,9 @@ FIXTURE_WORKSPACE = (
 REQUEST = "generate tests for src/main/java/com/example/RetryPolicy.java"
 SOURCE_PATH = "src/main/java/com/example/RetryPolicy.java"
 TEST_PATH = "src/test/java/com/example/RetryPolicyTest.java"
+MODIFY_REQUEST = "generate tests for src/main/java/com/example/Calculator.java"
+MODIFY_SOURCE_PATH = "src/main/java/com/example/Calculator.java"
+MODIFY_TEST_PATH = "src/test/java/com/example/CalculatorTest.java"
 
 
 class TestGenerationVerticalSliceTests(unittest.TestCase):
@@ -100,7 +103,14 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
             self.assertIn("class RetryPolicy", context.evidence.items[0].content)
             return proposal
 
-        def generate_patch(client, received_proposal, context, workspace):
+        def generate_patch(
+            client,
+            received_proposal,
+            context,
+            workspace,
+            existing_test_content,
+        ):
+            self.assertIsNone(existing_test_content)
             proposed_patch.validate_result(
                 received_proposal,
                 context.discovery,
@@ -133,6 +143,97 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
         )
         return agent, patch_generator
 
+    def make_modify_agent(self):
+        interpretation = TaskInterpretation(
+            intent=TaskIntent.GENERATE_TESTS,
+            target=MODIFY_SOURCE_PATH,
+            search_terms=["Calculator.java", "Calculator"],
+        )
+        proposal = TestProposal(
+            target_path=MODIFY_SOURCE_PATH,
+            proposed_test_path=MODIFY_TEST_PATH,
+            test_framework=TestFramework.JUNIT5,
+            test_cases=[
+                ProposedTestCase(
+                    name="addsNegativeNumbers",
+                    behavior="Adds two negative integers.",
+                    rationale="Covers addition with negative operands.",
+                    evidence_indices=[0],
+                )
+            ],
+            assumptions=[],
+            insufficient_evidence_reason=None,
+        )
+        existing_content = (FIXTURE_WORKSPACE / MODIFY_TEST_PATH).read_text(
+            encoding="utf-8"
+        )
+        proposed_patch = ProposedPatch(
+            operation=PatchOperation.MODIFY,
+            path=MODIFY_TEST_PATH,
+            expected_existing_content=existing_content,
+            proposed_content=(
+                "package com.example;\n\n"
+                "import static org.junit.jupiter.api.Assertions.assertEquals;\n\n"
+                "import org.junit.jupiter.api.Test;\n\n"
+                "class CalculatorTest {\n"
+                "    @Test\n"
+                "    void addsTwoNumbers() {\n"
+                "        assertEquals(5, new Calculator().add(2, 3));\n"
+                "    }\n\n"
+                "    @Test\n"
+                "    void addsNegativeNumbers() {\n"
+                "        assertEquals(-5, new Calculator().add(-2, -3));\n"
+                "    }\n"
+                "}\n"
+            ),
+            rationale="Adds coverage for negative operands.",
+            applied=False,
+        )
+
+        def generate_patch(
+            client,
+            received_proposal,
+            context,
+            workspace,
+            existing_test_content,
+        ):
+            self.assertEqual(existing_content, existing_test_content)
+            self.assertEqual(
+                ["addsNegativeNumbers"],
+                [case.name for case in received_proposal.test_cases],
+            )
+            proposed_patch.validate_result(
+                received_proposal,
+                context.discovery,
+                workspace,
+            )
+            return proposed_patch
+
+        patch_generator = Mock(side_effect=generate_patch)
+        agent = CodingAssistantAgent(
+            client=object(),
+            workspace=FIXTURE_WORKSPACE,
+            generate_response=Mock(),
+            interpret_intention=Mock(return_value=interpretation),
+            select_tool=Mock(return_value=RetrievalRequest(
+                tool=READ_FILE,
+                path=MODIFY_SOURCE_PATH,
+                query=None,
+            )),
+            decide_next_retrieval=Mock(return_value=RetrievalDecision(
+                action="stop",
+                tool=None,
+                path=None,
+                query=None,
+                stop_reason="sufficient_evidence",
+                reason="The target source is sufficient.",
+            )),
+            analyze_bugs=Mock(),
+            propose_tests=Mock(return_value=proposal),
+            get_test_patch=patch_generator,
+        )
+        return agent, patch_generator
+
     def test_request_produces_valid_unapplied_patch_without_writing_fixture(self):
         before = self.snapshot_fixture()
         agent, patch_generator = self.make_agent()
@@ -147,6 +248,20 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
         self.assertFalse((FIXTURE_WORKSPACE / TEST_PATH).exists())
         self.assertEqual(before, self.snapshot_fixture())
         patch_generator.assert_called_once()
+
+    def test_existing_test_produces_valid_unapplied_modify_patch(self):
+        before = self.snapshot_fixture()
+        agent, patch_generator = self.make_modify_agent()
+
+        result = agent.generate_test_patch(MODIFY_REQUEST)
+
+        self.assertEqual(PatchOperation.MODIFY, result.operation)
+        self.assertEqual(MODIFY_TEST_PATH, result.path)
+        self.assertFalse(result.applied)
+        self.assertIn("void addsTwoNumbers()", result.proposed_content)
+        self.assertIn("void addsNegativeNumbers()", result.proposed_content)
+        patch_generator.assert_called_once()
+        self.assertEqual(before, self.snapshot_fixture())
 
     def test_repeated_request_is_suppressed_without_writing_fixture(self):
         before = self.snapshot_fixture()
