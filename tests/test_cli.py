@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from cd_assist.cli import (
+    handle_apply_patch_command,
     handle_ask_command,
     handle_explain_command,
     handle_find_bug_command,
@@ -19,6 +20,8 @@ from cd_assist.models import (
     TaskIntent,
     TaskInterpretation,
 )
+from cd_assist.patches import PatchApplicationError, PatchApplicationReason
+from cd_assist.input_util import should_apply_patch
 
 
 class HandleExplainCommandTests(unittest.TestCase):
@@ -52,9 +55,9 @@ class HandleAskCommandTests(unittest.TestCase):
         build_working_context.return_value = "working context"
         agent.ask_question.return_value = "agent answer"
 
-        handle_ask_command("ask validation", agent, "workspace")
+        handle_ask_command("ask validation", agent)
 
-        search_files.assert_called_once_with("workspace", "validation")
+        search_files.assert_called_once_with(agent.workspace, "validation")
         build_working_context.assert_called_once_with(search_results)
         agent.ask_question.assert_called_once_with("validation", "working context")
         print_agent_response.assert_called_once_with("agent answer")
@@ -74,7 +77,7 @@ class HandleAskCommandTests(unittest.TestCase):
         error = ModelResponseError("Could not generate a model response")
         agent.ask_question.side_effect = error
 
-        handle_ask_command("ask validation", agent, "workspace")
+        handle_ask_command("ask validation", agent)
 
         print_exception.assert_called_once_with(error)
         print_agent_response.assert_not_called()
@@ -83,7 +86,7 @@ class HandleAskCommandTests(unittest.TestCase):
     def test_reports_missing_query(self, print_no_query):
         agent = Mock()
 
-        handle_ask_command("ask", agent, "workspace")
+        handle_ask_command("ask", agent)
 
         print_no_query.assert_called_once_with()
         agent.ask_question.assert_not_called()
@@ -101,7 +104,7 @@ class HandleAskCommandTests(unittest.TestCase):
         error = FileParseError("Workspace is not a directory")
         search_files.side_effect = error
 
-        handle_ask_command("ask validation", agent, "workspace")
+        handle_ask_command("ask validation", agent)
 
         print_exception.assert_called_once_with(error)
         agent.ask_question.assert_not_called()
@@ -169,7 +172,7 @@ class RunAppTests(unittest.TestCase):
 
         run_app("workspace", agent)
 
-        handle_ask_command.assert_called_once_with("ask validation", agent, "workspace")
+        handle_ask_command.assert_called_once_with("ask validation", agent)
         handle_explain_command.assert_called_once_with("explain Example.java", agent)
         print_goodbye.assert_called_once_with()
 
@@ -268,6 +271,73 @@ class RunAppTests(unittest.TestCase):
             agent,
         )
         print_goodbye.assert_called_once_with()
+
+    @patch("cd_assist.cli.print_goodbye")
+    @patch("cd_assist.cli.print_intro")
+    @patch("cd_assist.cli.handle_apply_patch_command")
+    @patch("builtins.input", side_effect=["apply patch", "exit"])
+    def test_routes_apply_patch_command(
+        self,
+        input_mock,
+        handle_apply_patch_command,
+        print_intro,
+        print_goodbye,
+    ):
+        agent = Mock()
+
+        run_app("workspace", agent)
+
+        handle_apply_patch_command.assert_called_once_with("apply patch", agent)
+        print_goodbye.assert_called_once_with()
+
+
+class ApplyPatchCommandRecognitionTests(unittest.TestCase):
+    def test_accepts_explicit_apply_patch_command(self):
+        self.assertTrue(should_apply_patch("  APPLY PATCH  "))
+
+    def test_rejects_additional_text(self):
+        self.assertFalse(should_apply_patch("apply patch now"))
+
+
+class HandleApplyPatchCommandTests(unittest.TestCase):
+    @patch("cd_assist.cli.print_agent_response")
+    def test_applies_pending_patch_and_prints_structured_result(self, print_agent_response):
+        result = Mock()
+        result.to_console_string.return_value = "Patch Applied\nStatus: applied"
+        agent = Mock()
+        agent.apply_pending_patch.return_value = result
+
+        handle_apply_patch_command("apply patch", agent)
+
+        agent.apply_pending_patch.assert_called_once_with()
+        print_agent_response.assert_called_once_with("Patch Applied\nStatus: applied")
+
+    @patch("cd_assist.cli.print_agent_response")
+    @patch("cd_assist.cli.print_exception")
+    def test_reports_no_pending_patch(self, print_exception, print_agent_response):
+        error = AgentResponseError("There is no pending patch to apply.")
+        agent = Mock()
+        agent.apply_pending_patch.side_effect = error
+
+        handle_apply_patch_command("apply patch", agent)
+
+        print_exception.assert_called_once_with(error)
+        print_agent_response.assert_not_called()
+
+    @patch("cd_assist.cli.print_agent_response")
+    @patch("cd_assist.cli.print_exception")
+    def test_reports_structured_application_error(self, print_exception, print_agent_response):
+        error = PatchApplicationError(
+            PatchApplicationReason.MODIFY_CONTENT_CHANGED,
+            "MODIFY destination content changed after validation.",
+        )
+        agent = Mock()
+        agent.apply_pending_patch.side_effect = error
+
+        handle_apply_patch_command("apply patch", agent)
+
+        print_exception.assert_called_once_with(error)
+        print_agent_response.assert_not_called()
 
 
 class HandleSelectToolCommandTests(unittest.TestCase):

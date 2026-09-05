@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator, StringConstraints
+from cd_assist.workspace import Workspace, WorkspaceError, WorkspaceErrorReason, as_workspace
 
 
 class PatchOperation(str, Enum):
@@ -28,6 +29,61 @@ class PatchValidationError(ValueError):
     def __init__(self, reason: PatchValidationReason, message: str):
         self.reason = reason
         super().__init__(message)
+
+
+class PatchApplicationStatus(str, Enum):
+    APPLIED = "applied"
+
+
+class PatchApplicationReason(str, Enum):
+    UNSAFE_DESTINATION = "unsafe_destination"
+    CREATE_DESTINATION_EXISTS = "create_destination_exists"
+    MODIFY_DESTINATION_MISSING = "modify_destination_missing"
+    MODIFY_DESTINATION_NOT_FILE = "modify_destination_not_file"
+    MODIFY_CONTENT_CHANGED = "modify_content_changed"
+    WRITE_FAILED = "write_failed"
+    VERIFICATION_FAILED = "verification_failed"
+
+
+class PatchApplicationError(Exception):
+    def __init__(self, reason: PatchApplicationReason, message: str):
+        self.reason = reason
+        super().__init__(message)
+
+
+@dataclass(frozen=True)
+class PatchApplicationResult:
+    """Application-produced evidence that one patch was written and verified."""
+
+    operation: PatchOperation
+    path: str
+    status: PatchApplicationStatus
+    bytes_written: int
+    previous_content: str | None
+    resulting_content: str
+
+    def __post_init__(self):
+        if self.status != PatchApplicationStatus.APPLIED:
+            raise ValueError("A successful application result must have applied status.")
+        if self.bytes_written < 0:
+            raise ValueError("Bytes written cannot be negative.")
+        if not self.resulting_content:
+            raise ValueError("A successful application result requires resulting content.")
+        if self.bytes_written != len(self.resulting_content.encode("utf-8")):
+            raise ValueError("Bytes written must match the UTF-8 resulting content size.")
+        if self.operation == PatchOperation.CREATE and self.previous_content is not None:
+            raise ValueError("CREATE application result cannot have previous content.")
+        if self.operation == PatchOperation.MODIFY and self.previous_content is None:
+            raise ValueError("MODIFY application result requires previous content.")
+
+    def to_console_string(self) -> str:
+        return (
+            "Patch Applied\n"
+            f"Operation: {self.operation.value}\n"
+            f"Path: {self.path}\n"
+            f"Status: {self.status.value}\n"
+            f"Bytes Written: {self.bytes_written}"
+        )
 
 
 BoundedPatchText = Annotated[
@@ -127,23 +183,25 @@ JAVA_PATCH_POLICY = PatchValidationPolicy(allowed_extensions=frozenset({".java"}
 
 
 def validate_patch(
-    workspace: str | Path,
+    workspace: Workspace | str | Path,
     patch: ProposedPatch,
     policy: PatchValidationPolicy,
 ) -> ValidatedPatch:
-    workspace_path = Path(workspace).resolve()
-    if not workspace_path.is_dir():
+    try:
+        workspace = as_workspace(workspace)
+    except WorkspaceError as error:
         raise PatchValidationError(
             PatchValidationReason.INVALID_WORKSPACE,
             "Workspace does not exist or is not a directory.",
-        )
+        ) from error
 
-    destination = (workspace_path / patch.path).resolve()
-    if not destination.is_relative_to(workspace_path):
+    try:
+        destination = workspace.resolve(patch.path)
+    except WorkspaceError as error:
         raise PatchValidationError(
             PatchValidationReason.OUTSIDE_WORKSPACE,
             "Patch destination is outside the workspace.",
-        )
+        ) from error
 
     if destination.suffix.lower() not in policy.allowed_extensions:
         raise PatchValidationError(
@@ -170,7 +228,7 @@ def validate_patch(
             )
 
         current_content = read_workspace_file_exact(
-            workspace_path,
+            workspace,
             patch.path,
             max_bytes=policy.max_existing_bytes,
         )
@@ -196,39 +254,26 @@ def validate_patch(
 
 
 def normalize_patch_path(raw_path: str) -> str:
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        raise ValueError("File path must be a non-empty string.")
-    normalized = raw_path.strip().replace("\\", "/")
-    path = PurePosixPath(normalized)
-    if path.is_absolute() or PureWindowsPath(normalized).is_absolute() or ".." in path.parts:
-        raise ValueError("File path must be relative to the workspace.")
-    return path.as_posix()
+    try:
+        return Workspace.normalize_relative_path(raw_path)
+    except WorkspaceError as error:
+        raise ValueError(str(error)) from error
 
 
 def read_workspace_file_exact(
-    workspace: str | Path,
+    workspace: Workspace | str | Path,
     requested_path: str,
     *,
     max_bytes: int,
 ) -> str:
-    workspace_path = Path(workspace).resolve()
-    file_path = (workspace_path / normalize_patch_path(requested_path)).resolve()
-
-    if not file_path.is_relative_to(workspace_path):
-        raise PatchValidationError(
-            PatchValidationReason.OUTSIDE_WORKSPACE,
-            "File is outside the workspace.",
-        )
-    if file_path.stat().st_size > max_bytes:
-        raise PatchValidationError(
-            PatchValidationReason.FILE_TOO_LARGE,
-            f"File exceeds the maximum size of {max_bytes} bytes.",
-        )
     try:
-        with file_path.open("r", encoding="utf-8", newline="") as file:
-            return file.read()
-    except UnicodeDecodeError as error:
-        raise PatchValidationError(
-            PatchValidationReason.INVALID_UTF8,
-            f"File is not valid UTF-8: {requested_path}",
-        ) from error
+        return as_workspace(workspace).read_exact(requested_path, max_bytes=max_bytes)
+    except WorkspaceError as error:
+        reason_map = {
+            WorkspaceErrorReason.OUTSIDE_WORKSPACE: PatchValidationReason.OUTSIDE_WORKSPACE,
+            WorkspaceErrorReason.INVALID_PATH: PatchValidationReason.OUTSIDE_WORKSPACE,
+            WorkspaceErrorReason.FILE_TOO_LARGE: PatchValidationReason.FILE_TOO_LARGE,
+            WorkspaceErrorReason.INVALID_UTF8: PatchValidationReason.INVALID_UTF8,
+        }
+        reason = reason_map.get(error.reason, PatchValidationReason.DESTINATION_NOT_FILE)
+        raise PatchValidationError(reason, str(error)) from error

@@ -4,33 +4,28 @@ from enum import Enum
 from dataclasses import dataclass
 
 from cd_assist.errors import FileParseError
+from cd_assist.workspace import Workspace, WorkspaceError, WorkspaceErrorReason, as_workspace
 
 
-def read_file(workspace: str | Path, requested_path: str, max_char=50_000):
-    workspace = Path(workspace).resolve()
-    target = (workspace / requested_path).resolve()
-
-    if not target.is_relative_to(workspace):
-        raise FileParseError("Path is outside the workspace")
-
-    if not target.is_file():
-        raise FileParseError("Path provided is not a file")
-    
-    if target.suffix.lower() != ".java":
-        raise FileParseError("File is not a .java file")
-
+def read_file(workspace: Workspace | str | Path, requested_path: str, max_char=50_000):
     try:
-        with target.open(encoding="utf-8") as file:
-            content = file.read(max_char + 1)
-    except UnicodeDecodeError as error:
-        raise FileParseError("File is not valid UTF-8") from error
-    except OSError as error:
-        raise FileParseError(f"Could not read file: {error}") from error
-    
-    return {
-        "content": content if len(content) <= max_char else content[:max_char],
-        "truncated": len(content) > max_char
-    }
+        workspace = as_workspace(workspace)
+        target = workspace.resolve(requested_path)
+        if target.suffix.lower() != ".java":
+            raise FileParseError("File is not a .java file")
+        content, truncated = workspace.read_bounded(requested_path, max_chars=max_char)
+        return {"content": content, "truncated": truncated}
+    except WorkspaceError as error:
+        if error.reason in {
+            WorkspaceErrorReason.INVALID_PATH,
+            WorkspaceErrorReason.OUTSIDE_WORKSPACE,
+        }:
+            raise FileParseError("Path is outside the workspace") from error
+        if error.reason in {WorkspaceErrorReason.MISSING, WorkspaceErrorReason.NOT_FILE}:
+            raise FileParseError("Path provided is not a file") from error
+        if error.reason == WorkspaceErrorReason.INVALID_UTF8:
+            raise FileParseError("File is not valid UTF-8") from error
+        raise FileParseError(str(error)) from error
 
 ##### search tools #####
 class MatchType(str, Enum):
@@ -61,12 +56,12 @@ class SearchResult:
                 )
 
 
-def search_files(workspace: str | Path, query: str, max_results=20, max_snippet_chars=200) -> list[SearchResult]:
-    workspace = Path(workspace).resolve()
+def search_files(workspace: Workspace | str | Path, query: str, max_results=20, max_snippet_chars=200) -> list[SearchResult]:
+    try:
+        workspace = as_workspace(workspace)
+    except WorkspaceError as error:
+        raise FileParseError("Workspace is not a directory") from error
     query = query.strip()
-
-    if not workspace.is_dir():
-        raise FileParseError("Workspace is not a directory")
 
     if not query:
         raise FileParseError("Search query cannot be empty")
@@ -80,28 +75,17 @@ def search_files(workspace: str | Path, query: str, max_results=20, max_snippet_
     results = []
 
     try:
-        paths = sorted(
-            (
-                path
-                for path in workspace.rglob("*")
-                if path.is_file() and path.suffix.lower() == ".java"
-            ),
-            key=lambda path: path.relative_to(workspace).as_posix(),
-        )
-    except OSError as error:
+        paths = workspace.files(suffix=".java")
+    except WorkspaceError as error:
         raise FileParseError(f"Could not search workspace: {error}") from error
 
     for path in paths:
-        resolved_path = path.resolve()
-        if not resolved_path.is_relative_to(workspace):
-            raise FileParseError("Search path is outside the workspace")
+        relative_path = workspace.relative_path(path)
 
-        relative_path = path.relative_to(workspace)
-
-        if query.lower() in relative_path.as_posix().lower():
+        if query.lower() in relative_path.lower():
             results.append(
                 SearchResult(
-                    path=relative_path.as_posix(),
+                    path=relative_path,
                     match_type=MatchType.PATH,
                 )
             )
@@ -110,12 +94,12 @@ def search_files(workspace: str | Path, query: str, max_results=20, max_snippet_
                 return results
 
         try:
-            with resolved_path.open(encoding="utf-8") as file:
+            with path.open(encoding="utf-8") as file:
                 for line_number, line in enumerate(file, start=1):
                     if query.lower() in line.lower():
                         results.append(
                             SearchResult(
-                                path=relative_path.as_posix(),
+                                path=relative_path,
                                 match_type=MatchType.CONTENT,
                                 line_snippet=LineSnippet(
                                     line=line_number,
@@ -128,11 +112,11 @@ def search_files(workspace: str | Path, query: str, max_results=20, max_snippet_
                         return results
         except UnicodeDecodeError as error:
             raise FileParseError(
-                f"File is not valid UTF-8: {relative_path.as_posix()}"
+                f"File is not valid UTF-8: {relative_path}"
             ) from error
         except OSError as error:
             raise FileParseError(
-                f"Could not read file: {relative_path.as_posix()}: {error}"
+                f"Could not read file: {relative_path}: {error}"
             ) from error
 
     return results

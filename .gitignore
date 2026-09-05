@@ -12,3 +12,9 @@ __pycache__/
 
 # Gradle caches
 .gradle/
+
+# Java fixture build output
+tests/fixtures/test_generation_vertical/target/
+tests/fixtures/discovery/maven-junit5/target/
+tests/fixtures/discovery/conflicting/target/
+tests/fixtures/discovery/gradle-junit4/bin/

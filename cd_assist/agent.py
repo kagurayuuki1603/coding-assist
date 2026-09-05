@@ -40,12 +40,16 @@ from cd_assist.test_generation import (
 from cd_assist.patches import (
     ProposedPatch,
     ValidatedPatch,
+    PatchApplicationResult,
     read_workspace_file_exact,
 )
+from cd_assist.patch_application import apply_patch as apply_validated_patch
 from cd_assist.tools import read_file
 from cd_assist.retrieval import run_retrieval_loop
-
-
+from cd_assist.workspace import (
+    Workspace,
+    as_workspace,
+)
 def init_agent(workspace, client):
     return CodingAssistantAgent(
         client=client,
@@ -56,7 +60,8 @@ def init_agent(workspace, client):
         decide_next_retrieval=decide_next_retrieval,
         analyze_bugs=analyze_bugs,
         propose_tests=propose_tests,
-        get_test_patch=get_test_patch
+        get_test_patch=get_test_patch,
+        patch_applicator=apply_validated_patch
     )
 
 def interpret_intention(client: OpenAI, user_request: str) -> TaskInterpretation:
@@ -221,7 +226,7 @@ def propose_tests(client: OpenAI, context: TestGenerationContext) -> TestProposa
 
     return proposal
 
-def get_test_patch(client: OpenAI, proposal: TestProposal, context: TestGenerationContext, workspace: Path | str, existing_test_content: str | None = None) -> ValidatedPatch:
+def get_test_patch(client: OpenAI, proposal: TestProposal, context: TestGenerationContext, workspace: Workspace | Path | str, existing_test_content: str | None = None) -> ValidatedPatch:
     agent_input = [
         {
             "role": "system",
@@ -341,16 +346,20 @@ class CodingAssistantAgent:
     def __init__(
         self,
         client: OpenAI,
-        workspace: Path | str,
+        workspace: Workspace | Path | str,
         generate_response: Callable[[OpenAI, str], str],
         interpret_intention: Callable[[OpenAI, str], TaskInterpretation],
         select_tool: Callable[[OpenAI, TaskInterpretation], RetrievalRequest],
         decide_next_retrieval: Callable[[OpenAI, TaskInterpretation, str], RetrievalDecision],
         analyze_bugs: Callable[[OpenAI, EvidenceSet, str], BugAnalysis],
         propose_tests: Callable[[OpenAI, TestGenerationContext], TestProposal],
-        get_test_patch: Callable[[OpenAI, TestProposal, TestGenerationContext, Path | str, str | None], ValidatedPatch],
+        get_test_patch: Callable[[OpenAI, TestProposal, TestGenerationContext, Workspace | Path | str, str | None], ValidatedPatch],
+        patch_applicator: Callable[
+            [Workspace, ValidatedPatch],
+            PatchApplicationResult,
+        ] = apply_validated_patch,
     ):
-        self.workspace = workspace
+        self.workspace = as_workspace(workspace)
         self.client = client
         self.proposal_fingerprints: set[str] = set()
         self.generate_response = generate_response
@@ -360,6 +369,8 @@ class CodingAssistantAgent:
         self.analyze_bugs = analyze_bugs
         self.propose_tests = propose_tests
         self.get_test_patch = get_test_patch
+        self.patch_applicator = patch_applicator
+        self.pending_patch: ValidatedPatch | None = None
 
     def has_proposal_fingerprint(self, fingerprint: str) -> bool:
         return fingerprint in self.proposal_fingerprints
@@ -516,4 +527,17 @@ Query: {query}
 
         self.remember_proposal_fingerprint(fingerprint)
 
+        self.pending_patch = test_patch
         return test_patch
+
+    def apply_pending_patch(self) -> PatchApplicationResult:
+        if self.pending_patch is None:
+            raise AgentResponseError("There is no pending patch to apply.")
+
+        result = self.patch_applicator(
+            self.workspace,
+            self.pending_patch,
+        )
+
+        self.pending_patch = None
+        return result

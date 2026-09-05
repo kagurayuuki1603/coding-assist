@@ -13,10 +13,11 @@ from cd_assist.input_util import (
     should_interpret,
     should_select_tool,
     should_retrieve_tool,
+    should_apply_patch,
 )
 from cd_assist.models import BugAnalysis
 from cd_assist.test_generation import FrameworkDiscoveryError
-from cd_assist.patches import ValidatedPatch
+from cd_assist.patches import ValidatedPatch, PatchApplicationResult, PatchApplicationError
 from cd_assist.print import (
     print_agent_response,
     print_exception,
@@ -58,7 +59,7 @@ def handle_explain_command(user_input: str, agent: CodingAssistantAgent):
     
     print_agent_response(response)
 
-def handle_ask_command(user_input: str, agent: CodingAssistantAgent, workspace: str):
+def handle_ask_command(user_input: str, agent: CodingAssistantAgent):
 
     query = validate_and_get_arg(user_input, print_no_query)
 
@@ -66,7 +67,7 @@ def handle_ask_command(user_input: str, agent: CodingAssistantAgent, workspace: 
         return 
 
     try:
-        search_results = search_files(workspace, query)
+        search_results = search_files(agent.workspace, query)
         context = build_working_context(search_results)
         response = agent.ask_question(query, context)
     except (FileParseError, ModelResponseError) as error:
@@ -146,6 +147,14 @@ def handle_generate_test_command(user_input: str, agent: CodingAssistantAgent):
         print_exception(error)
         return
 
+def handle_apply_patch_command(user_input: str, agent: CodingAssistantAgent):
+    try:
+        result: PatchApplicationResult = agent.apply_pending_patch()
+        print_agent_response(result.to_console_string())
+    except (ValueError, ModelResponseError, FrameworkDiscoveryError, AgentResponseError, PatchApplicationError) as error:
+        print_exception(error)
+        return
+
 def run_app(workspace, agent):
     print_intro(workspace)
 
@@ -161,7 +170,7 @@ def run_app(workspace, agent):
                 handle_explain_command(user_input, agent)
 
             elif should_ask(user_input):
-                handle_ask_command(user_input, agent, workspace)
+                handle_ask_command(user_input, agent)
 
             elif should_interpret(user_input):
                 handle_interpret_command(user_input, agent)
@@ -177,6 +186,9 @@ def run_app(workspace, agent):
 
             elif should_generate_tests(user_input):
                 handle_generate_test_command(user_input, agent)
+
+            elif should_apply_patch(user_input):
+                handle_apply_patch_command(user_input, agent)
 
             else:
                 print_idk()

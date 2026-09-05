@@ -223,7 +223,7 @@ class CodingAssistantAgentTests(unittest.TestCase):
         agent = init_agent(FIXTURE_WORKSPACE, client)
 
         self.assertIs(client, agent.client)
-        self.assertEqual(FIXTURE_WORKSPACE, agent.workspace)
+        self.assertEqual(FIXTURE_WORKSPACE.resolve(), agent.workspace.root)
         self.assertFalse(hasattr(agent, "generate_tests"))
 
 
@@ -295,7 +295,7 @@ class GatherTestGenerationContextTests(unittest.TestCase):
         agent.gather_retrievals_for_interpretation.assert_called_once_with(
             interpretation
         )
-        discover_test_framework.assert_called_once_with(FIXTURE_WORKSPACE)
+        discover_test_framework.assert_called_once_with(agent.workspace)
 
     @patch("cd_assist.agent.discover_test_framework")
     def test_rejects_non_test_intent_before_retrieval_or_discovery(
@@ -652,6 +652,7 @@ class GenerateTestPatchTests(unittest.TestCase):
         result = agent.generate_test_patch(context.request)
 
         self.assertIs(test_patch, result)
+        self.assertIs(test_patch, agent.pending_patch)
         proposer.assert_called_once_with(agent.client, context)
         patch_generator.assert_called_once_with(
             agent.client, proposal, context, agent.workspace, None
@@ -687,15 +688,19 @@ class GenerateTestPatchTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
+            patch_applicator = Mock()
             agent = CodingAssistantAgent(
                 object(), workspace, Mock(), Mock(), Mock(), Mock(), Mock(),
                 Mock(return_value=proposal), Mock(return_value=test_patch),
+                patch_applicator=patch_applicator,
             )
             agent.gather_test_generation_context = Mock(return_value=context)
 
             agent.generate_test_patch(context.request)
 
             self.assertEqual([], list(workspace.iterdir()))
+            patch_applicator.assert_not_called()
+
 
     def test_proposal_fingerprint_is_stable_for_generated_method_names(self):
         first = self.make_proposal().model_copy(
@@ -966,7 +971,7 @@ class GenerateTestPatchTests(unittest.TestCase):
             agent.client,
             proposal,
             context,
-            workspace,
+            agent.workspace,
             existing_content,
         )
 
@@ -993,6 +998,62 @@ class GenerateTestPatchTests(unittest.TestCase):
 
         patch_generator.assert_not_called()
         self.assertEqual(set(), agent.proposal_fingerprints)
+
+
+class ApplyPendingPatchTests(unittest.TestCase):
+    def make_agent(self, patch_applicator):
+        return CodingAssistantAgent(
+            object(),
+            FIXTURE_WORKSPACE,
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+            patch_applicator=patch_applicator,
+        )
+
+    def test_agent_starts_without_pending_patch(self):
+        agent = self.make_agent(Mock())
+
+        self.assertIsNone(agent.pending_patch)
+
+    def test_apply_without_pending_patch_does_not_invoke_applicator(self):
+        patch_applicator = Mock()
+        agent = self.make_agent(patch_applicator)
+
+        with self.assertRaisesRegex(AgentResponseError, "no pending patch"):
+            agent.apply_pending_patch()
+
+        patch_applicator.assert_not_called()
+
+    def test_successful_application_invokes_once_and_clears_pending_patch(self):
+        pending_patch = Mock()
+        application_result = Mock()
+        patch_applicator = Mock(return_value=application_result)
+        agent = self.make_agent(patch_applicator)
+        agent.pending_patch = pending_patch
+
+        result = agent.apply_pending_patch()
+
+        self.assertIs(application_result, result)
+        patch_applicator.assert_called_once_with(agent.workspace, pending_patch)
+        self.assertIsNone(agent.pending_patch)
+
+    def test_failed_application_retains_pending_patch(self):
+        pending_patch = Mock()
+        failure = RuntimeError("Application failed")
+        patch_applicator = Mock(side_effect=failure)
+        agent = self.make_agent(patch_applicator)
+        agent.pending_patch = pending_patch
+
+        with self.assertRaisesRegex(RuntimeError, "Application failed"):
+            agent.apply_pending_patch()
+
+        patch_applicator.assert_called_once_with(agent.workspace, pending_patch)
+        self.assertIs(pending_patch, agent.pending_patch)
 
 
 class RetrievalEvidenceIntegrationTests(unittest.TestCase):

@@ -1504,7 +1504,7 @@ class DiscoveryHelperTests(unittest.TestCase):
 
             results = discover_test_files(workspace, "src/test/java")
 
-        self.assertEqual([uppercase_test], results)
+            self.assertEqual([uppercase_test.resolve()], results)
 
     def test_limits_number_of_discovered_test_files(self):
         with tempfile.TemporaryDirectory() as directory:

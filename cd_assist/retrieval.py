@@ -1,4 +1,3 @@
-from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from cd_assist.errors import FileParseError, ModelResponseError
@@ -14,6 +13,7 @@ from cd_assist.models import (
     TaskInterpretation,
 )
 from cd_assist.tools import read_file, search_files
+from cd_assist.workspace import Workspace, WorkspaceError, as_workspace
 
 MAX_RETRIEVAL_ROUNDS = 3
 
@@ -88,13 +88,13 @@ def resolve_retrieval_request(workspace, request: RetrievalRequest)-> RetrievalR
     if request.tool != READ_FILE:
         return request
 
-    workspace_path = Path(workspace)
-    requested_path = PurePosixPath(request.path.replace("\\", "/"))
-
-    if requested_path.is_absolute() or ".." in requested_path.parts:
+    try:
+        workspace = as_workspace(workspace)
+        requested_path = workspace.normalize_relative_path(request.path)
+    except WorkspaceError:
         return request
 
-    if (workspace_path / requested_path).is_file():
+    if workspace.is_file(requested_path):
         return request
 
     return RetrievalRequest(

@@ -42,12 +42,12 @@ This project deliberately focuses on reliability and security:
 
 ## Current Status
 
-v0.5 is implemented through v0.5.2. The CLI supports natural-language task
+v0.5 is implemented through v0.5.3. The CLI supports natural-language task
 interpretation, model-directed repository retrieval, bounded multi-step
 retrieval, structured evidence-based bug reports, and test generation as
-validated, unapplied CREATE or MODIFY repository changes. A generic workspace
-policy now separates untrusted model proposals from validated patches before
-test-specific semantic checks run.
+validated CREATE or MODIFY repository changes. A generic workspace policy
+separates untrusted model proposals from validated patches before test-specific
+semantic checks run, and a separate explicit command applies one pending patch.
 
 Current capabilities:
 
@@ -63,6 +63,7 @@ Current capabilities:
 - application validation of supporting evidence references
 - explicit insufficient-evidence results
 - rejection of style-only observations as defects
+- shared live `Workspace` boundary for safe path resolution and file access
 - workspace-boundary and path-traversal protection
 - case-insensitive Java-extension validation
 - bounded UTF-8 file reading
@@ -81,8 +82,12 @@ Current capabilities:
 - same-session suppression of repeated test proposals
 - missing-only MODIFY proposals for existing test files
 - test proposals that are printed without changing repository files
+- explicit `apply patch` command for one pending validated patch
+- controlled CREATE and exact-content-preconditioned MODIFY application
+- exact read-back verification and structured application results
 - unit and integration-style tests for reading, searching, retrieval loops,
-  evidence construction, agent prompts, test generation, and CLI routing
+  evidence construction, agent prompts, test generation, patch application,
+  and CLI routing
 
 The earlier `explain` and `ask` commands remain available. The v0.3 retrieval
 path can interpret a natural-language request, select an approved read tool,
@@ -187,30 +192,33 @@ exit
 appear in a Java path or source line. A question such as `ask Where is user
 validation performed?` requires the natural-language retrieval added in v0.3.
 
-To exercise the complete test-generation flow, run:
+To exercise the complete test-generation and application flow without changing
+the checked-in fixture, copy it to a disposable workspace and run:
 
 ```bash
-python3 -m cd_assist.cli \
-  --workspace tests/fixtures/test_generation_vertical
+cp -R tests/fixtures/test_generation_vertical /tmp/cd-assist-smoke-053 && python3 -m cd_assist.cli --workspace /tmp/cd-assist-smoke-053
 ```
+
+Use a different destination if `/tmp/cd-assist-smoke-053` already exists.
 
 Then enter:
 
 ```text
 generate tests for src/main/java/com/example/RetryPolicy.java
-generate tests for src/main/java/com/example/RetryPolicy.java
+apply patch
+apply patch
 exit
 ```
 
 The first command prints a validated CREATE proposal with `Applied: False`.
-The second identical command reports that the proposal was already generated
-in the current session. Neither command writes `RetryPolicyTest.java`.
+It does not write `RetryPolicyTest.java`. The first `apply patch` explicitly
+creates and verifies the proposed file, then clears the pending patch. The
+second reports that there is no pending patch to apply.
 
-Test generation supports unapplied CREATE proposals for new test files and
-unapplied MODIFY proposals for existing test files. MODIFY validation requires
-the destination's exact existing content, rejects stale proposals, and preserves
-existing test methods. Both operations remain read-only and print
-`Applied: False`.
+Test generation remains read-only and supports CREATE proposals for new test
+files and MODIFY proposals for existing test files. Applying is a separate
+action. MODIFY requires the destination's exact existing content, rejects stale
+proposals without overwriting them, and preserves existing test methods.
 
 Run the project's tests:
 
@@ -258,9 +266,11 @@ inside source files.
 
 ## Next Version
 
-The next milestone, v0.5.3, applies one small `ValidatedPatch` through controlled
-application code. The current implementation validates patches but deliberately
-does not write them.
+The next milestone, v0.5.4, gathers the production target, callers,
+dependencies, surrounding implementation, and relevant tests needed for a
+small behavior-preserving refactor. Patch generation and application remain
+separate, and controlled application continues to require the explicit
+`apply patch` command.
 
 ### `write_file()`
 

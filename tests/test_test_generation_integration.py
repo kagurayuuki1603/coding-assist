@@ -1,3 +1,5 @@
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -5,6 +7,11 @@ from unittest.mock import Mock, patch
 from cd_assist.agent import CodingAssistantAgent
 from cd_assist.cli import run_app
 from cd_assist.errors import AgentResponseError
+from cd_assist.patches import (
+    PatchApplicationError,
+    PatchApplicationReason,
+    PatchApplicationStatus,
+)
 from cd_assist.models import (
     READ_FILE,
     RetrievalDecision,
@@ -35,12 +42,17 @@ MODIFY_TEST_PATH = "src/test/java/com/example/CalculatorTest.java"
 
 
 class TestGenerationVerticalSliceTests(unittest.TestCase):
-    def snapshot_fixture(self):
+    def snapshot_workspace(self, workspace, *, excluding=()):
+        excluded = set(excluding)
         return {
-            path.relative_to(FIXTURE_WORKSPACE).as_posix(): path.read_bytes()
-            for path in FIXTURE_WORKSPACE.rglob("*")
+            path.relative_to(workspace).as_posix(): path.read_bytes()
+            for path in workspace.rglob("*")
             if path.is_file()
+            and path.relative_to(workspace).as_posix() not in excluded
         }
+
+    def snapshot_fixture(self):
+        return self.snapshot_workspace(FIXTURE_WORKSPACE)
 
     def make_proposal(self):
         return TestProposal(
@@ -88,7 +100,7 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
             applied=False,
         )
 
-    def make_agent(self):
+    def make_agent(self, workspace=FIXTURE_WORKSPACE):
         interpretation = TaskInterpretation(
             intent=TaskIntent.GENERATE_TESTS,
             target=SOURCE_PATH,
@@ -122,7 +134,7 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
         patch_generator = Mock(side_effect=generate_patch)
         agent = CodingAssistantAgent(
             client=object(),
-            workspace=FIXTURE_WORKSPACE,
+            workspace=workspace,
             generate_response=Mock(),
             interpret_intention=Mock(return_value=interpretation),
             select_tool=Mock(return_value=RetrievalRequest(
@@ -144,7 +156,7 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
         )
         return agent, patch_generator
 
-    def make_modify_agent(self):
+    def make_modify_agent(self, workspace=FIXTURE_WORKSPACE):
         interpretation = TaskInterpretation(
             intent=TaskIntent.GENERATE_TESTS,
             target=MODIFY_SOURCE_PATH,
@@ -165,7 +177,7 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
             assumptions=[],
             insufficient_evidence_reason=None,
         )
-        existing_content = (FIXTURE_WORKSPACE / MODIFY_TEST_PATH).read_text(
+        existing_content = (workspace / MODIFY_TEST_PATH).read_text(
             encoding="utf-8"
         )
         proposed_patch = ProposedPatch(
@@ -213,7 +225,7 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
         patch_generator = Mock(side_effect=generate_patch)
         agent = CodingAssistantAgent(
             client=object(),
-            workspace=FIXTURE_WORKSPACE,
+            workspace=workspace,
             generate_response=Mock(),
             interpret_intention=Mock(return_value=interpretation),
             select_tool=Mock(return_value=RetrievalRequest(
@@ -303,6 +315,123 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
         patch_generator.assert_called_once()
         print_goodbye.assert_called_once_with()
         self.assertEqual(before, self.snapshot_fixture())
+
+    def test_create_patch_is_generated_then_explicitly_applied_in_temporary_workspace(self):
+        fixture_before = self.snapshot_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "project"
+            shutil.copytree(FIXTURE_WORKSPACE, workspace)
+            before = self.snapshot_workspace(workspace)
+            agent, _ = self.make_agent(workspace)
+
+            patch = agent.generate_test_patch(REQUEST)
+
+            self.assertFalse((workspace / TEST_PATH).exists())
+            self.assertEqual(before, self.snapshot_workspace(workspace))
+
+            result = agent.apply_pending_patch()
+
+            self.assertEqual(PatchApplicationStatus.APPLIED, result.status)
+            self.assertEqual(PatchOperation.CREATE, result.operation)
+            self.assertEqual(patch.proposed_content, result.resulting_content)
+            self.assertEqual(
+                patch.proposed_content,
+                (workspace / TEST_PATH).read_text(encoding="utf-8"),
+            )
+            self.assertIsNone(agent.pending_patch)
+            self.assertEqual(
+                before,
+                self.snapshot_workspace(workspace, excluding={TEST_PATH}),
+            )
+
+        self.assertEqual(fixture_before, self.snapshot_fixture())
+
+    def test_modify_patch_replaces_only_current_file_in_temporary_workspace(self):
+        fixture_before = self.snapshot_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "project"
+            shutil.copytree(FIXTURE_WORKSPACE, workspace)
+            before = self.snapshot_workspace(workspace)
+            previous_content = (workspace / MODIFY_TEST_PATH).read_text(encoding="utf-8")
+            agent, _ = self.make_modify_agent(workspace)
+
+            patch = agent.generate_test_patch(MODIFY_REQUEST)
+
+            self.assertEqual(previous_content, (workspace / MODIFY_TEST_PATH).read_text(encoding="utf-8"))
+
+            result = agent.apply_pending_patch()
+
+            self.assertEqual(PatchOperation.MODIFY, result.operation)
+            self.assertEqual(previous_content, result.previous_content)
+            self.assertEqual(patch.proposed_content, result.resulting_content)
+            self.assertEqual(
+                patch.proposed_content,
+                (workspace / MODIFY_TEST_PATH).read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                self.snapshot_workspace(workspace, excluding={MODIFY_TEST_PATH}),
+                {path: content for path, content in before.items() if path != MODIFY_TEST_PATH},
+            )
+
+        self.assertEqual(fixture_before, self.snapshot_fixture())
+
+    def test_stale_modify_is_not_applied_in_temporary_workspace(self):
+        fixture_before = self.snapshot_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "project"
+            shutil.copytree(FIXTURE_WORKSPACE, workspace)
+            agent, _ = self.make_modify_agent(workspace)
+            patch = agent.generate_test_patch(MODIFY_REQUEST)
+            stale_content = "package com.example;\n\nclass CalculatorTest { /* changed */ }\n"
+            (workspace / MODIFY_TEST_PATH).write_text(stale_content, encoding="utf-8")
+
+            with self.assertRaises(PatchApplicationError) as raised:
+                agent.apply_pending_patch()
+
+            self.assertEqual(
+                PatchApplicationReason.MODIFY_CONTENT_CHANGED,
+                raised.exception.reason,
+            )
+            self.assertEqual(
+                stale_content,
+                (workspace / MODIFY_TEST_PATH).read_text(encoding="utf-8"),
+            )
+            self.assertIs(patch, agent.pending_patch)
+
+        self.assertEqual(fixture_before, self.snapshot_fixture())
+
+    @patch("cd_assist.cli.print_goodbye")
+    @patch("cd_assist.cli.print_intro")
+    @patch("cd_assist.cli.print_exception")
+    @patch("cd_assist.cli.print_agent_response")
+    @patch("builtins.input", side_effect=[REQUEST, "apply patch", "exit"])
+    def test_cli_generates_then_applies_create_in_temporary_workspace(
+        self,
+        input_mock,
+        print_agent_response,
+        print_exception,
+        print_intro,
+        print_goodbye,
+    ):
+        fixture_before = self.snapshot_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "project"
+            shutil.copytree(FIXTURE_WORKSPACE, workspace)
+            agent, _ = self.make_agent(workspace)
+
+            run_app(workspace, agent)
+
+            outputs = [call.args[0] for call in print_agent_response.call_args_list]
+            self.assertEqual(2, len(outputs))
+            self.assertIn("Proposed Patch", outputs[0])
+            self.assertIn("Applied: False", outputs[0])
+            self.assertIn("Patch Applied", outputs[1])
+            self.assertIn("Status: applied", outputs[1])
+            self.assertTrue((workspace / TEST_PATH).is_file())
+            print_exception.assert_not_called()
+            print_goodbye.assert_called_once_with()
+
+        self.assertEqual(fixture_before, self.snapshot_fixture())
 
 
 if __name__ == "__main__":

@@ -24,3 +24,6 @@ def should_find_bugs(user_input):
 
 def should_generate_tests(user_input):
     return check_input(user_input, "generate tests")
+
+def should_apply_patch(user_input):
+    return user_input.strip().lower() == "apply patch"

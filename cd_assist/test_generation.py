@@ -1,6 +1,6 @@
 
 from enum import Enum
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath
 import re
 from typing import Annotated
 
@@ -14,6 +14,7 @@ from cd_assist.patches import (
     ValidatedPatch,
     validate_patch,
 )
+from cd_assist.workspace import Workspace, WorkspaceError, as_workspace
 
 MAX_DISCOVERY_FILE_BYTES = 200_000
 MAX_DISCOVERY_TEST_FILES = 100
@@ -198,7 +199,7 @@ class TestProposal(BaseModel):
     @classmethod
     def validate_relative_paths(cls, path: str | None) -> str | None:
         if path is not None:
-            return normalize_relative_path(path)
+            return Workspace.normalize_relative_path(path)
         else:
             return None
 
@@ -264,7 +265,7 @@ def validate_test_patch(
     patch: ProposedPatch,
     test_proposal: TestProposal,
     test_discovery: TestFrameworkDiscovery,
-    workspace: Path | str,
+    workspace: Workspace | Path | str,
 ) -> ValidatedPatch:
         validated_patch = validate_patch(workspace, patch, JAVA_PATCH_POLICY)
 
@@ -346,7 +347,7 @@ class TestAssessment(BaseModel):
     @field_validator("destination_path")
     @classmethod
     def validate_relative_paths(cls, path: str) -> str :
-        return normalize_relative_path(path)
+        return Workspace.normalize_relative_path(path)
 
     @field_validator("existing_method_identities")
     @classmethod
@@ -401,7 +402,7 @@ class ExistingTestInspection(BaseModel):
         return identities
 
 
-def inspect_existing_test(workspace: Path | str, destination_path: str) -> ExistingTestInspection:
+def inspect_existing_test(workspace: Workspace | Path | str, destination_path: str) -> ExistingTestInspection:
     JAVA_CLASS_PATTERN = re.compile(r"\b(?:public\s+)?(?:final\s+|abstract\s+)?class\s+([A-Za-z_$][\w$]*)\b")
     JAVA_TEST_METHOD_PATTERN = re.compile(
         r"@Test(?:\s*\([^)]*\))?\s+"
@@ -411,16 +412,16 @@ def inspect_existing_test(workspace: Path | str, destination_path: str) -> Exist
         re.MULTILINE,
     )
 
-    workspace_path = Path(workspace).resolve()
-    destination = (workspace_path / destination_path).resolve()
-
-    if not destination.is_relative_to(workspace_path):
-        raise ValueError("Test destination is outside the workspace.")
+    try:
+        workspace = as_workspace(workspace)
+        destination = workspace.resolve(destination_path)
+    except WorkspaceError as error:
+        raise ValueError("Test destination is outside the workspace.") from error
 
     if destination.suffix.lower() != ".java":
         raise ValueError("Test destination must be a Java file.")
 
-    normalized_path = destination.relative_to(workspace_path).as_posix()
+    normalized_path = workspace.relative_path(destination)
 
     if not destination.exists():
         return ExistingTestInspection(
@@ -433,7 +434,10 @@ def inspect_existing_test(workspace: Path | str, destination_path: str) -> Exist
     if not destination.is_file():
         raise ValueError("Test destination is not a file.")
 
-    content = destination.read_text(encoding="utf-8")
+    try:
+        content = workspace.read_exact(normalized_path, max_bytes=100_000)
+    except WorkspaceError as error:
+        raise ValueError(str(error)) from error
     match = JAVA_CLASS_PATTERN.search(content)
 
     if match is None:
@@ -528,7 +532,7 @@ def classify_test_overlap(proposal: TestProposal, inspection: ExistingTestInspec
     destination_path = proposal.proposed_test_path
 
     try:
-        inspected_path = normalize_relative_path(inspection.destination_path)
+        inspected_path = Workspace.normalize_relative_path(inspection.destination_path)
     except ValueError:
         return TestAssessment(
             classification=TestClassification.CONFLICTING,
@@ -614,11 +618,11 @@ def validate_path_in_evidence_set(target_path: str, evidence_set: EvidenceSet) -
         raise ValueError("Target path must match a repository evidence path")
 
 def validate_path_under_test_root(proposed_path: str, test_roots: list[str]) -> bool:
-    normalized_path = normalize_relative_path(proposed_path)
+    normalized_path = Workspace.normalize_relative_path(proposed_path)
     proposed = PurePosixPath(normalized_path)
 
     roots = [
-        PurePosixPath(normalize_relative_path(root))
+        PurePosixPath(Workspace.normalize_relative_path(root))
         for root in test_roots
     ]
 
@@ -631,7 +635,7 @@ def validate_path_under_test_root(proposed_path: str, test_roots: list[str]) -> 
 
 def normalize_relative_paths(paths: list[str]) -> list[str]:
     normalized_paths = [
-        normalize_relative_path(path)
+        Workspace.normalize_relative_path(path)
         for path in paths
     ]
 
@@ -640,48 +644,27 @@ def normalize_relative_paths(paths: list[str]) -> list[str]:
 
     return normalized_paths
 
-def normalize_relative_path(raw_path: str) -> str:
-    path = raw_path.strip()
-
-    if not path:
-        raise ValueError("path must not be blank")
-
-    path = path.replace("\\", "/")
-    parsed = PurePosixPath(path)
-    windows_path = PureWindowsPath(path)
-
-    if parsed.is_absolute() or windows_path.is_absolute():
-        raise ValueError("path must be relative")
-
-    if ".." in parsed.parts:
-        raise ValueError("path must not contain parent traversal")
-
-    normalized = parsed.as_posix()
-
-    if normalized == ".":
-        raise ValueError("path must not be blank")
-
-    return normalized
-
 def discover_build_tool(
-    workspace: Path,
+    workspace: Workspace | Path | str,
 ) -> tuple[BuildTool, list[DiscoveryPath], DiscoveryReason | None]:
     
     file_evidence = []
 
-    if not workspace.is_dir():
+    try:
+        workspace = as_workspace(workspace)
+    except WorkspaceError:
         return BuildTool.UNKNOWN, file_evidence, "Workspace is not a directory."
 
     maven_config_file = ["pom.xml"]
     gradle_config_file = ["build.gradle", "build.gradle.kts"]
 
-    has_maven = (workspace / "pom.xml").is_file()
+    has_maven = workspace.is_file("pom.xml")
     if has_maven:
         file_evidence.extend(maven_config_file)
 
     has_gradle = False
     for config_file in gradle_config_file:
-        if (workspace / config_file).is_file():
+        if workspace.is_file(config_file):
             has_gradle = True
             file_evidence.append(config_file)
 
@@ -694,14 +677,21 @@ def discover_build_tool(
     else:
         return BuildTool.UNKNOWN, file_evidence, "Neither Gradle or Maven were found."
 
-def discover_source_roots(workspace: Path) -> list[str]:
-    if (workspace / "src/main/java").is_dir():
+def discover_source_roots(workspace: Workspace | Path | str) -> list[str]:
+    try:
+        workspace = as_workspace(workspace)
+    except WorkspaceError:
+        return []
+    if workspace.is_dir("src/main/java"):
         return ["src/main/java"]
     return []
 
-def discover_test_roots(workspace: Path) -> list[str]:
-    expected_path = (workspace / "src/test/java")
-    if expected_path.is_dir():
+def discover_test_roots(workspace: Workspace | Path | str) -> list[str]:
+    try:
+        workspace = as_workspace(workspace)
+    except WorkspaceError:
+        return []
+    if workspace.is_dir("src/test/java"):
         return ["src/test/java"]
     return []
 
@@ -714,56 +704,43 @@ def contains_all(content: str, keywords: list[str]) -> bool:
     return all(keyword.lower() in normalized_content for keyword in keywords)
 
 def read_discovery_file(
-    workspace: Path,
+    workspace: Workspace | Path | str,
     path: Path,
     max_bytes: int = MAX_DISCOVERY_FILE_BYTES,
 ) -> str:
     try:
-        relative_path = path.relative_to(workspace).as_posix()
-    except ValueError as error:
+        workspace = as_workspace(workspace)
+        relative_path = workspace.relative_path(path)
+    except (ValueError, WorkspaceError) as error:
         raise FrameworkDiscoveryError("Discovery file is outside the workspace.") from error
 
     try:
-        with path.open("rb") as file:
-            content = file.read(max_bytes + 1)
-    except OSError as error:
-        raise FrameworkDiscoveryError(
-            f"Could not read discovery file: {relative_path}"
-        ) from error
-
-    if len(content) > max_bytes:
-        raise FrameworkDiscoveryError(
-            f"Discovery file exceeds {max_bytes} bytes: {relative_path}"
-        )
-
-    try:
-        return content.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise FrameworkDiscoveryError(
-            f"Discovery file is not valid UTF-8: {relative_path}"
-        ) from error
+        return workspace.read_exact(relative_path, max_bytes=max_bytes)
+    except WorkspaceError as error:
+        if "maximum size" in str(error):
+            message = f"Discovery file exceeds {max_bytes} bytes: {relative_path}"
+        elif "valid UTF-8" in str(error):
+            message = f"Discovery file is not valid UTF-8: {relative_path}"
+        else:
+            message = f"Could not read discovery file: {relative_path}"
+        raise FrameworkDiscoveryError(message) from error
 
 def discover_test_files(
-    workspace: Path,
+    workspace: Workspace | Path | str,
     test_root: DiscoveryPath,
     max_files: int = MAX_DISCOVERY_TEST_FILES,
 ) -> list[Path]:
     if not isinstance(max_files, int) or max_files <= 0:
         raise ValueError("max_files must be a positive integer")
 
-    root = workspace / test_root
-
-    if not root.is_dir():
+    try:
+        workspace = as_workspace(workspace)
+    except WorkspaceError:
         return []
-
-    return sorted(
-        path
-        for path in root.rglob("*")
-        if path.is_file() and path.suffix.lower() == ".java"
-    )[:max_files]
+    return workspace.files(under=test_root, suffix=".java")[:max_files]
 
 def inspect_test_framework_evidence(
-    workspace: Path,
+    workspace: Workspace | Path | str,
     test_root: list[str],
 ) -> tuple[
     TestFramework,
@@ -771,6 +748,7 @@ def inspect_test_framework_evidence(
     TestDiscoveryStatus,
     DiscoveryReason | None,
 ]:
+    workspace = as_workspace(workspace)
     junit4_evidence_paths: list[DiscoveryPath] = []
     junit5_evidence_paths: list[DiscoveryPath] = []
     has_junit4 = False
@@ -783,8 +761,8 @@ def inspect_test_framework_evidence(
     junit4_maven_keywords = ["<groupId>junit</groupId>", "<artifactId>junit</artifactId>"]
 
     for file in config_files:
-        path = workspace / file
-        if path.exists() and path.is_file():
+        if workspace.is_file(file):
+            path = workspace.resolve(file)
             file_content = read_discovery_file(workspace, path)
             is_junit4 = contains_any(file_content, junit4_gradle_keywords) or contains_all(
                 file_content,
@@ -806,7 +784,7 @@ def inspect_test_framework_evidence(
         paths = discover_test_files(workspace, root)
         for path in paths: 
             file_content = read_discovery_file(workspace, path)
-            relative_path = path.relative_to(workspace).as_posix()
+            relative_path = workspace.relative_path(path)
             if contains_any(file_content, junit5_test_keywords):
                 has_junit5 = True
                 junit5_evidence_paths.append(relative_path)
@@ -827,27 +805,13 @@ def inspect_test_framework_evidence(
     else:
         return TestFramework.UNKNOWN, junit4_evidence_paths + junit5_evidence_paths, TestDiscoveryStatus.INSUFFICIENT_EVIDENCE, "Neither JUnit4 nor JUnit5 were found."
 
-def validate_workspace(workspace: Path | str) -> Path:
-    if not isinstance(workspace, (str, Path)):
-        raise TypeError("workspace must be a string or Path")
+def validate_workspace(workspace: Workspace | Path | str) -> Workspace:
+    try:
+        return as_workspace(workspace)
+    except WorkspaceError as error:
+        raise ValueError(str(error)) from error
 
-    if isinstance(workspace, str):
-        workspace = workspace.strip()
-
-        if not workspace:
-            raise ValueError("workspace must not be empty")
-
-    path = Path(workspace)
-
-    if not path.exists():
-        raise ValueError("workspace does not exist")
-
-    if not path.is_dir():
-        raise ValueError("workspace must be a directory")
-
-    return path
-
-def discover_test_framework(workspace_input: Path | str) -> TestFrameworkDiscovery:
+def discover_test_framework(workspace_input: Workspace | Path | str) -> TestFrameworkDiscovery:
 
     workspace = validate_workspace(workspace_input)
 
