@@ -19,6 +19,7 @@ from cd_assist.test_generation import (
     TestFramework,
     TestGenerationContext,
     TestProposal,
+    validate_test_patch,
 )
 
 
@@ -111,12 +112,12 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
             existing_test_content,
         ):
             self.assertIsNone(existing_test_content)
-            proposed_patch.validate_result(
+            return validate_test_patch(
+                proposed_patch,
                 received_proposal,
                 context.discovery,
                 workspace,
             )
-            return proposed_patch
 
         patch_generator = Mock(side_effect=generate_patch)
         agent = CodingAssistantAgent(
@@ -202,12 +203,12 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
                 ["addsNegativeNumbers"],
                 [case.name for case in received_proposal.test_cases],
             )
-            proposed_patch.validate_result(
+            return validate_test_patch(
+                proposed_patch,
                 received_proposal,
                 context.discovery,
                 workspace,
             )
-            return proposed_patch
 
         patch_generator = Mock(side_effect=generate_patch)
         agent = CodingAssistantAgent(
@@ -294,7 +295,7 @@ class TestGenerationVerticalSliceTests(unittest.TestCase):
         run_app(FIXTURE_WORKSPACE, agent)
 
         printed_patch = print_agent_response.call_args.args[0]
-        self.assertIn("Proposed Test Patch", printed_patch)
+        self.assertIn("Proposed Patch", printed_patch)
         self.assertIn("Applied: False", printed_patch)
         error = print_exception.call_args.args[0]
         self.assertIsInstance(error, AgentResponseError)

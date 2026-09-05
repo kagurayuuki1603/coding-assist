@@ -2,11 +2,18 @@
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, StringConstraints
 
 from cd_assist.models import EvidenceSet, TaskInterpretation
+from cd_assist.patches import (
+    JAVA_PATCH_POLICY,
+    PatchOperation,
+    ProposedPatch,
+    ValidatedPatch,
+    validate_patch,
+)
 
 MAX_DISCOVERY_FILE_BYTES = 200_000
 MAX_DISCOVERY_TEST_FILES = 100
@@ -253,102 +260,40 @@ class TestProposal(BaseModel):
         )
 
 
-class PatchOperation(str, Enum):
-    CREATE = "create"
-    MODIFY = "modify"
+def validate_test_patch(
+    patch: ProposedPatch,
+    test_proposal: TestProposal,
+    test_discovery: TestFrameworkDiscovery,
+    workspace: Path | str,
+) -> ValidatedPatch:
+        validated_patch = validate_patch(workspace, patch, JAVA_PATCH_POLICY)
 
-BoundedPatchText = Annotated[
-    str,
-    StringConstraints(
-        strip_whitespace=True,
-        min_length=1,
-        max_length=2_000,
-    ),
-]
-
-class ProposedPatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    operation: PatchOperation
-    path: str
-    expected_existing_content: str | None
-    proposed_content: BoundedPatchText
-    rationale: BoundedPatchText
-    applied: Literal[False]
-
-    @model_validator(mode="after")
-    def validate_proposed_patch(self):
-        if self.operation == PatchOperation.CREATE:
-            if self.expected_existing_content is not None:
-                raise ValueError("CREATE patch should not have any existing content.")
-        if self.operation == PatchOperation.MODIFY:
-            if not self.expected_existing_content:
-                raise ValueError("MODIFY patch must have existing content.")
-        return self
-
-    @field_validator("path")
-    @classmethod
-    def validate_relative_paths(cls, path: str) -> str :
-        return normalize_relative_path(path)
-
-    @field_validator("proposed_content")
-    @classmethod
-    def reject_markdown_fences(cls, content: str) -> str:
-        if "```" in content:
-            raise ValueError("Proposed content must not contain Markdown fences.")
-        return content
-
-    def validate_result(self, test_proposal: TestProposal, test_discovery: TestFrameworkDiscovery, workspace: Path | str):
         if test_proposal.test_framework != test_discovery.test_framework:
             raise ValueError("Framework in proposal and discovery does not match.")
 
-        validate_path_under_test_root(self.path, test_discovery.test_roots)
+        validate_path_under_test_root(patch.path, test_discovery.test_roots)
 
-        workspace = Path(workspace).resolve()
-        destination = (workspace / self.path).resolve()
-
-        if not destination.is_relative_to(workspace):
-            raise ValueError("Patch destination is outside the workspace.")
-
-        # check that destination does not exist for CREATE
-        if self.operation == PatchOperation.CREATE and destination.exists():
-            raise ValueError("CREATE patch destination already exists.")
-        elif self.operation == PatchOperation.MODIFY:
-            if not destination.exists():
-                raise ValueError("MODIFY patch destination does not exist.")
-
-            current_content = read_workspace_file_exact(
-                workspace,
-                self.path,
-                allowed_extensions={".java"},
-                max_bytes=100_000,
-            )
-
-            if current_content != self.expected_existing_content:
-                raise ValueError("File content has changed since the patch was generated.")
-
-            if self.proposed_content == self.expected_existing_content:
-                raise ValueError("Proposed content should be different from the existing content.")
-
+        if patch.operation == PatchOperation.MODIFY:
+            current_content = patch.expected_existing_content
             existing_test_methods = extract_java_test_method_sources(current_content)
             for method_name, method_source in existing_test_methods.items():
-                if method_source not in self.proposed_content:
+                if method_source not in patch.proposed_content:
                     raise ValueError(
                         f"MODIFY patch changes or removes existing test method: {method_name}."
                     )
 
         # validate that destination ends with .java
-        path_parsed = PurePosixPath(self.path)
+        path_parsed = PurePosixPath(patch.path)
 
         if path_parsed.suffix.lower() != ".java":
             raise ValueError("Patch destination must be a Java file.")
 
-        if self.path != test_proposal.proposed_test_path:
+        if patch.path != test_proposal.proposed_test_path:
             raise ValueError("Path does not match TestProposal proposed test path.")
 
         #filename matches declared test class
-        expected_class_name = PurePosixPath(self.path).stem
-        if not re.search(rf"\bclass\s+{re.escape(expected_class_name)}\b", self.proposed_content):
+        expected_class_name = PurePosixPath(patch.path).stem
+        if not re.search(rf"\bclass\s+{re.escape(expected_class_name)}\b", patch.proposed_content):
             raise ValueError("Declared test class does not match destination filename.")
 
         # validate proposal imports
@@ -356,40 +301,22 @@ class ProposedPatch(BaseModel):
         junit4_test_keyword = ["org.junit.test"]
 
         if test_proposal.test_framework == TestFramework.JUNIT4:
-            if not contains_any(self.proposed_content, junit4_test_keyword):
+            if not contains_any(patch.proposed_content, junit4_test_keyword):
                 raise ValueError("JUnit4 Framework proposed test did not use Junit4 imports.")
-            if contains_any(self.proposed_content, junit5_test_keyword):
+            if contains_any(patch.proposed_content, junit5_test_keyword):
                 raise ValueError("JUnit4 Framework proposed test used Junit5 imports.")
         elif test_proposal.test_framework == TestFramework.JUNIT5:
-            if not contains_any(self.proposed_content, junit5_test_keyword):
+            if not contains_any(patch.proposed_content, junit5_test_keyword):
                 raise ValueError("JUnit5 Framework proposed test did not use Junit5 imports.")
-            if contains_any(self.proposed_content, junit4_test_keyword):
+            if contains_any(patch.proposed_content, junit4_test_keyword):
                 raise ValueError("JUnit5 Framework proposed test used Junit4 imports.")
 
         # validate proposed content contains proposal test methods
         proposed_test_names = [ test_case.name for test_case in test_proposal.test_cases ]
 
-        if not contains_all(self.proposed_content, proposed_test_names):
+        if not contains_all(patch.proposed_content, proposed_test_names):
             raise ValueError("Not all proposed test names were generated.")
-
-    def to_console_string(self) -> str:
-        expected_existing_content = (
-            self.expected_existing_content
-            if self.expected_existing_content is not None
-            else "None"
-        )
-
-        return (
-            "Proposed Test Patch\n"
-            f"Operation: {self.operation.value}\n"
-            f"Path: {self.path}\n"
-            f"Expected Existing Content: {expected_existing_content}\n"
-            f"Applied: {self.applied}\n\n"
-            "Rationale\n"
-            f"{self.rationale}\n\n"
-            "Proposed Content\n"
-            f"{self.proposed_content}"
-        )
+        return validated_patch
 
 
 class TestClassification(str, Enum):
@@ -942,77 +869,3 @@ def discover_test_framework(workspace_input: Path | str) -> TestFrameworkDiscove
         test_status=test_discovery_status,
         test_reason=test_reason
     )
-
-def read_workspace_file_exact(
-    workspace: str | Path,
-    requested_path: str,
-    *,
-    allowed_extensions: set[str] | None = None,
-    max_bytes: int = 100_000,
-) -> str:
-    """
-    Read a complete UTF-8 file contained within a workspace.
-
-    Unlike the model-facing read_file() tool, this function never truncates
-    content. Files larger than max_bytes are rejected.
-    """
-    if not isinstance(requested_path, str) or not requested_path.strip():
-        raise ValueError("File path must be a non-empty string.")
-
-    if max_bytes <= 0:
-        raise ValueError("Maximum file size must be positive.")
-
-    requested_path = requested_path.strip().replace("\\", "/")
-
-    if (
-        PurePosixPath(requested_path).is_absolute()
-        or PureWindowsPath(requested_path).is_absolute()
-        or ".." in PurePosixPath(requested_path).parts
-    ):
-        raise ValueError("File path must be relative to the workspace.")
-
-    workspace_path = Path(workspace).resolve()
-
-    if not workspace_path.is_dir():
-        raise ValueError("Workspace does not exist or is not a directory.")
-
-    file_path = (workspace_path / requested_path).resolve()
-
-    if not file_path.is_relative_to(workspace_path):
-        raise ValueError("File is outside the workspace.")
-
-    if not file_path.exists():
-        raise FileNotFoundError(f"File does not exist: {requested_path}")
-
-    if not file_path.is_file():
-        raise ValueError(f"Path is not a file: {requested_path}")
-
-    if allowed_extensions is not None:
-        normalized_extensions = {
-            extension.lower()
-            if extension.startswith(".")
-            else f".{extension.lower()}"
-            for extension in allowed_extensions
-        }
-
-        if file_path.suffix.lower() not in normalized_extensions:
-            raise ValueError(
-                f"Unsupported file type: {file_path.suffix or '(none)'}"
-            )
-
-    file_size = file_path.stat().st_size
-
-    if file_size > max_bytes:
-        raise ValueError(
-            f"File exceeds the maximum size of {max_bytes} bytes."
-        )
-
-    try:
-        # newline="" preserves the file's original line endings. This matters
-        # when the content is used as an exact MODIFY precondition.
-        with file_path.open("r", encoding="utf-8", newline="") as file:
-            return file.read()
-    except UnicodeDecodeError as error:
-        raise ValueError(
-            f"File is not valid UTF-8: {requested_path}"
-        ) from error

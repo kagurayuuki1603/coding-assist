@@ -42,11 +42,12 @@ This project deliberately focuses on reliability and security:
 
 ## Current Status
 
-v0.4 is implemented through v0.4.7. The CLI supports natural-language task
+v0.5 is implemented through v0.5.2. The CLI supports natural-language task
 interpretation, model-directed repository retrieval, bounded multi-step
 retrieval, structured evidence-based bug reports, and test generation as
-validated, unapplied repository changes. Fixture-based vertical tests cover the
-complete request-to-proposed-patch flow.
+validated, unapplied CREATE or MODIFY repository changes. A generic workspace
+policy now separates untrusted model proposals from validated patches before
+test-specific semantic checks run.
 
 Current capabilities:
 
@@ -72,10 +73,13 @@ Current capabilities:
 - streamed model responses
 - friendly file and model error reporting
 - Maven and Gradle test-framework discovery
-- structured test proposals and validated CREATE patches
+- structured test proposals and validated CREATE and MODIFY patches
+- generic workspace-safe patch validation with structured rejection reasons
+- a distinct validated-patch type for application-approved changes
+- exact-content preconditions for MODIFY patches
 - repository-aware duplicate and conflict detection for generated tests
 - same-session suppression of repeated test proposals
-- explicit reporting when an existing test requires future MODIFY support
+- missing-only MODIFY proposals for existing test files
 - test proposals that are printed without changing repository files
 - unit and integration-style tests for reading, searching, retrieval loops,
   evidence construction, agent prompts, test generation, and CLI routing
@@ -202,10 +206,11 @@ The first command prints a validated CREATE proposal with `Applied: False`.
 The second identical command reports that the proposal was already generated
 in the current session. Neither command writes `RetryPolicyTest.java`.
 
-Test generation currently supports new test files through unapplied CREATE
-proposals. If the destination test already exists, the assistant reports the
-missing test cases and states that adding them requires MODIFY support. MODIFY
-patches and controlled writes begin in v0.5.
+Test generation supports unapplied CREATE proposals for new test files and
+unapplied MODIFY proposals for existing test files. MODIFY validation requires
+the destination's exact existing content, rejects stale proposals, and preserves
+existing test methods. Both operations remain read-only and print
+`Applied: False`.
 
 Run the project's tests:
 
@@ -253,9 +258,9 @@ inside source files.
 
 ## Next Version
 
-v0.5 introduces controlled writes and refactoring. Its first milestone expands
-the CREATE-only patch contract to represent validated MODIFY operations for
-existing files.
+The next milestone, v0.5.3, applies one small `ValidatedPatch` through controlled
+application code. The current implementation validates patches but deliberately
+does not write them.
 
 ### `write_file()`
 

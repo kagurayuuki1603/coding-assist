@@ -31,12 +31,16 @@ from cd_assist.test_generation import (
     TestGenerationContext,
     TestProposal,
     discover_test_framework,
-    ProposedPatch,
     inspect_existing_test,
     classify_test_overlap,
     ExistingTestInspection,
     TestClassification,
-    read_workspace_file_exact
+    validate_test_patch,
+)
+from cd_assist.patches import (
+    ProposedPatch,
+    ValidatedPatch,
+    read_workspace_file_exact,
 )
 from cd_assist.tools import read_file
 from cd_assist.retrieval import run_retrieval_loop
@@ -217,7 +221,7 @@ def propose_tests(client: OpenAI, context: TestGenerationContext) -> TestProposa
 
     return proposal
 
-def get_test_patch(client: OpenAI, proposal: TestProposal, context: TestGenerationContext, workspace: Path | str, existing_test_content: str | None = None) -> ProposedPatch:
+def get_test_patch(client: OpenAI, proposal: TestProposal, context: TestGenerationContext, workspace: Path | str, existing_test_content: str | None = None) -> ValidatedPatch:
     agent_input = [
         {
             "role": "system",
@@ -265,11 +269,16 @@ def get_test_patch(client: OpenAI, proposal: TestProposal, context: TestGenerati
         )
 
     try:
-        patch.validate_result(proposal, context.discovery, workspace)
+        validated_patch = validate_test_patch(
+            patch,
+            proposal,
+            context.discovery,
+            workspace,
+        )
     except ValueError as error:
         raise AgentResponseError(f"The model did not return a valid test patch: {error}") from error
 
-    return patch
+    return validated_patch
 
 def generate_response(client: OpenAI, prompt: str) -> str:
     streamed_text = ""
@@ -339,7 +348,7 @@ class CodingAssistantAgent:
         decide_next_retrieval: Callable[[OpenAI, TaskInterpretation, str], RetrievalDecision],
         analyze_bugs: Callable[[OpenAI, EvidenceSet, str], BugAnalysis],
         propose_tests: Callable[[OpenAI, TestGenerationContext], TestProposal],
-        get_test_patch: Callable[[OpenAI, TestProposal, TestGenerationContext, Path | str], ProposedPatch],
+        get_test_patch: Callable[[OpenAI, TestProposal, TestGenerationContext, Path | str, str | None], ValidatedPatch],
     ):
         self.workspace = workspace
         self.client = client
@@ -454,7 +463,7 @@ Query: {query}
 
         return proposal
 
-    def generate_test_patch(self, query: str) -> ProposedPatch:
+    def generate_test_patch(self, query: str) -> ValidatedPatch:
         context: TestGenerationContext = self.gather_test_generation_context(query)
 
         proposal: TestProposal = self.propose_tests(self.client, context)
@@ -477,7 +486,6 @@ Query: {query}
             existing_test_content = read_workspace_file_exact(
                 self.workspace,
                 proposal.proposed_test_path,
-                allowed_extensions={".java"},
                 max_bytes=100_000,
             )
 
@@ -498,7 +506,7 @@ Query: {query}
         if self.has_proposal_fingerprint(fingerprint):
             raise AgentResponseError("This test proposal was already generated in this session.")
 
-        test_patch: ProposedPatch = self.get_test_patch(
+        test_patch: ValidatedPatch = self.get_test_patch(
             self.client,
             proposal_for_patch,
             context,

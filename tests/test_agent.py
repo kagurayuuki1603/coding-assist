@@ -555,7 +555,8 @@ class GenerateTestPatchTests(unittest.TestCase):
 
         result = get_test_patch(client, proposal, context, FIXTURE_WORKSPACE)
 
-        self.assertIs(test_patch, result)
+        self.assertEqual(test_patch.path, result.path)
+        self.assertEqual(test_patch.proposed_content, result.proposed_content)
         call = client.responses.parse.call_args
         self.assertIs(ProposedPatch, call.kwargs["text_format"])
         self.assertEqual(TEST_PATCH_INSTRUCTIONS, call.kwargs["input"][0]["content"])
@@ -599,7 +600,8 @@ class GenerateTestPatchTests(unittest.TestCase):
                 existing_content,
             )
 
-        self.assertIs(test_patch, result)
+        self.assertEqual(test_patch.path, result.path)
+        self.assertEqual(test_patch.proposed_content, result.proposed_content)
         model_input = client.responses.parse.call_args.kwargs["input"]
         self.assertEqual(4, len(model_input))
         self.assertIn(existing_content, model_input[3]["content"])

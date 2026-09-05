@@ -15,7 +15,8 @@ from cd_assist.input_util import (
     should_retrieve_tool,
 )
 from cd_assist.models import BugAnalysis
-from cd_assist.test_generation import FrameworkDiscoveryError, ProposedPatch
+from cd_assist.test_generation import FrameworkDiscoveryError
+from cd_assist.patches import ValidatedPatch
 from cd_assist.print import (
     print_agent_response,
     print_exception,
@@ -139,7 +140,7 @@ def handle_generate_test_command(user_input: str, agent: CodingAssistantAgent):
         print_no_query()
         return
     try:
-        test_patch: ProposedPatch = agent.generate_test_patch(user_input.strip())
+        test_patch: ValidatedPatch = agent.generate_test_patch(user_input.strip())
         print_agent_response(test_patch.to_console_string())
     except (ValueError, ModelResponseError, FrameworkDiscoveryError, AgentResponseError) as error:
         print_exception(error)

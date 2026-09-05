@@ -32,6 +32,7 @@ from cd_assist.test_generation import (
     inspect_test_framework_evidence,
     inspect_existing_test,
     read_discovery_file,
+    validate_test_patch,
 )
 
 
@@ -448,7 +449,7 @@ class ProposedPatchTests(unittest.TestCase):
         proposal = self.make_proposal()
         discovery = self.make_discovery()
 
-        patch.validate_result(proposal, discovery, FIXTURE_ROOT)
+        validate_test_patch(patch, proposal, discovery, FIXTURE_ROOT)
 
         self.assertEqual(PatchOperation.CREATE, patch.operation)
         self.assertTrue(patch.path.endswith("RetryPolicyTest.java"))
@@ -523,7 +524,8 @@ class ProposedPatchTests(unittest.TestCase):
                 expected_existing_content=existing_content,
             )
 
-            patch.validate_result(
+            validate_test_patch(
+                patch,
                 self.make_proposal(),
                 self.make_discovery(),
                 workspace,
@@ -556,7 +558,8 @@ class ProposedPatchTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "existingBehavior"):
-                patch.validate_result(
+                validate_test_patch(
+                    patch,
                     self.make_proposal(),
                     self.make_discovery(),
                     workspace,
@@ -600,7 +603,8 @@ class ProposedPatchTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "existingBehavior"):
-                patch.validate_result(
+                validate_test_patch(
+                    patch,
                     self.make_proposal(),
                     self.make_discovery(),
                     workspace,
@@ -614,7 +618,8 @@ class ProposedPatchTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "does not exist"):
-                patch.validate_result(
+                validate_test_patch(
+                    patch,
                     self.make_proposal(),
                     self.make_discovery(),
                     directory,
@@ -633,7 +638,8 @@ class ProposedPatchTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "content has changed"):
-                patch.validate_result(
+                validate_test_patch(
+                    patch,
                     self.make_proposal(),
                     self.make_discovery(),
                     workspace,
@@ -655,7 +661,8 @@ class ProposedPatchTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "should be different"):
-                patch.validate_result(
+                validate_test_patch(
+                    patch,
                     self.make_proposal(),
                     self.make_discovery(),
                     workspace,
@@ -678,7 +685,7 @@ class ProposedPatchTests(unittest.TestCase):
             proposal = self.make_proposal(proposed_test_path=path)
 
             with self.assertRaisesRegex(ValueError, "Unsupported file type"):
-                patch.validate_result(proposal, self.make_discovery(), workspace)
+                validate_test_patch(patch, proposal, self.make_discovery(), workspace)
 
     def test_rejects_extra_fields(self):
         with self.assertRaises(ValidationError):
@@ -688,7 +695,8 @@ class ProposedPatchTests(unittest.TestCase):
         patch = self.make_patch(path="src/main/java/com/example/RetryPolicyTest.java")
 
         with self.assertRaisesRegex(ValueError, "test root"):
-            patch.validate_result(
+            validate_test_patch(
+                patch,
                 self.make_proposal(), self.make_discovery(), FIXTURE_ROOT
             )
 
@@ -708,7 +716,7 @@ class ProposedPatchTests(unittest.TestCase):
             build_tool=BuildTool.GRADLE,
         )
 
-        patch.validate_result(proposal, discovery, FIXTURE_ROOT)
+        validate_test_patch(patch, proposal, discovery, FIXTURE_ROOT)
 
     def test_rejects_non_java_destination(self):
         patch = self.make_patch(path="src/test/java/com/example/RetryPolicyTest.txt")
@@ -716,14 +724,15 @@ class ProposedPatchTests(unittest.TestCase):
             proposed_test_path="src/test/java/com/example/RetryPolicyTest.txt"
         )
 
-        with self.assertRaisesRegex(ValueError, "Java file"):
-            patch.validate_result(proposal, self.make_discovery(), FIXTURE_ROOT)
+        with self.assertRaisesRegex(ValueError, "Unsupported file type"):
+            validate_test_patch(patch, proposal, self.make_discovery(), FIXTURE_ROOT)
 
     def test_rejects_path_different_from_proposed_test_path(self):
         patch = self.make_patch(path="src/test/java/com/example/OtherTest.java")
 
         with self.assertRaisesRegex(ValueError, "proposed test path"):
-            patch.validate_result(
+            validate_test_patch(
+                patch,
                 self.make_proposal(), self.make_discovery(), FIXTURE_ROOT
             )
 
@@ -740,7 +749,8 @@ class ProposedPatchTests(unittest.TestCase):
         for content in (junit4_content, mixed_content):
             with self.subTest(content=content):
                 with self.assertRaisesRegex(ValueError, "JUnit5"):
-                    self.make_patch(proposed_content=content).validate_result(
+                    validate_test_patch(
+                        self.make_patch(proposed_content=content),
                         self.make_proposal(),
                         self.make_discovery(),
                         FIXTURE_ROOT,
@@ -752,8 +762,8 @@ class ProposedPatchTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "test names"):
-            self.make_patch().validate_result(
-                proposal, self.make_discovery(), FIXTURE_ROOT
+            validate_test_patch(
+                self.make_patch(), proposal, self.make_discovery(), FIXTURE_ROOT
             )
 
     def test_rejects_framework_mismatch_between_proposal_and_discovery(self):
@@ -763,8 +773,8 @@ class ProposedPatchTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "Framework"):
-            self.make_patch().validate_result(
-                self.make_proposal(), discovery, FIXTURE_ROOT
+            validate_test_patch(
+                self.make_patch(), self.make_proposal(), discovery, FIXTURE_ROOT
             )
 
     def test_rejects_class_name_different_from_destination_filename(self):
@@ -774,7 +784,8 @@ class ProposedPatchTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "class"):
-            self.make_patch(proposed_content=content).validate_result(
+            validate_test_patch(
+                self.make_patch(proposed_content=content),
                 self.make_proposal(),
                 self.make_discovery(),
                 FIXTURE_ROOT,
@@ -788,7 +799,8 @@ class ProposedPatchTests(unittest.TestCase):
             destination.touch()
 
             with self.assertRaisesRegex(ValueError, "already exists"):
-                self.make_patch().validate_result(
+                validate_test_patch(
+                    self.make_patch(),
                     self.make_proposal(),
                     self.make_discovery(),
                     workspace,
@@ -796,7 +808,8 @@ class ProposedPatchTests(unittest.TestCase):
 
     def test_accepts_nonexistent_destination_with_string_workspace(self):
         with tempfile.TemporaryDirectory() as directory:
-            self.make_patch().validate_result(
+            validate_test_patch(
+                self.make_patch(),
                 self.make_proposal(),
                 self.make_discovery(),
                 directory,
@@ -807,7 +820,7 @@ class ProposedPatchTests(unittest.TestCase):
 
         output = patch.to_console_string()
 
-        self.assertIn("Proposed Test Patch", output)
+        self.assertIn("Proposed Patch", output)
         self.assertIn("Operation: create", output)
         self.assertIn(
             "Path: src/test/java/com/example/RetryPolicyTest.java",
