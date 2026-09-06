@@ -4,8 +4,19 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Annotated, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
+from cd_assist.evidence_validation import (
+    require_unique,
+    validate_evidence_indices_in_range,
+)
 from cd_assist.errors import ModelResponseError
 from cd_assist.tools import MatchType
 
@@ -364,6 +375,11 @@ class BugFinding(BaseModel):
     confidence: ConfidenceLevel
     evidence_indices: list[EvidenceIndex] = Field(min_length=1, max_length=10)
 
+    @field_validator("evidence_indices")
+    @classmethod
+    def reject_duplicate_evidence_indices(cls, indices: list[int]) -> list[int]:
+        return require_unique(indices, "Evidence indices")
+
 class BugAnalysis(BaseModel):
     findings: list[BugFinding] = Field(max_length=10)
     insufficient_evidence_reason: BugText | None
@@ -384,10 +400,12 @@ class BugAnalysis(BaseModel):
 
     def validate_evidence_references(self, evidence_set: EvidenceSet):
         for finding in self.findings:
+            validate_evidence_indices_in_range(
+                finding.evidence_indices,
+                len(evidence_set.items),
+                "Invalid evidence index: {index}",
+            )
             for index in finding.evidence_indices:
-                if index < 0 or index >= len(evidence_set.items):
-                    raise ValueError(f"Invalid evidence index: {index}")
-                
                 evidence = evidence_set.items[index]
                 if finding.path != evidence.path:
                     raise ValueError("Finding path does not match referenced evidence")

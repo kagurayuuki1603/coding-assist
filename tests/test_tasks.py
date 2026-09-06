@@ -394,6 +394,10 @@ class BugAnalysisTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.make_finding(evidence_indices=[-1])
 
+    def test_rejects_duplicate_evidence_indices(self):
+        with self.assertRaisesRegex(ValidationError, "must be unique"):
+            self.make_finding(evidence_indices=[0, 0])
+
     def test_rejects_invalid_confidence(self):
         with self.assertRaises(ValidationError):
             self.make_finding(confidence="certain")

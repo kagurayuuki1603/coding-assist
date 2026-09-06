@@ -7,6 +7,10 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, StringConstraints
 
 from cd_assist.models import EvidenceSet, TaskInterpretation
+from cd_assist.evidence_validation import (
+    require_unique,
+    validate_evidence_indices_in_range as validate_indices_in_range,
+)
 from cd_assist.patches import (
     JAVA_PATCH_POLICY,
     PatchOperation,
@@ -157,10 +161,7 @@ class ProposedTestCase(BaseModel):
     @field_validator("evidence_indices")
     @classmethod
     def validate_evidence_indices(cls, indices: list[int]) -> list[int]:
-        if len(indices) != len(set(indices)):
-            raise ValueError("Evidence indices must be unique")
-
-        return indices
+        return require_unique(indices, "Evidence indices")
 
 
 class TestProposal(BaseModel):
@@ -606,12 +607,14 @@ def validate_evidence_indices_in_range(
     test_cases: list[ProposedTestCase],
     evidence_set_item_count: int,
 ) -> None:
-    if not all(
-        index < evidence_set_item_count
-        for test_case in test_cases
-        for index in test_case.evidence_indices
-    ):
-        raise ValueError("Evidence index is outside the evidence set")
+    validate_indices_in_range(
+        [
+            index
+            for test_case in test_cases
+            for index in test_case.evidence_indices
+        ],
+        evidence_set_item_count,
+    )
 
 def validate_path_in_evidence_set(target_path: str, evidence_set: EvidenceSet) -> None:
     if not any(target_path == item.path for item in evidence_set.items):
