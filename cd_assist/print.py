@@ -21,12 +21,7 @@ def print_exception(error):
 
 def print_interpretation(interpretation):
     print(f"{COMPUTER}{GAMBA} I have interpreted!")
-    print(f"Intent: {interpretation.intent.value}")
-    print(f"Target: {interpretation.target or 'Not specified'}")
-    print("Search terms:")
-
-    for term in interpretation.search_terms:
-        print(f"- {term}")
+    print(interpretation.to_console_string())
 
 def print_agent_response(response):
     print(f"{COMPUTER}{EXCITE} I have a response!")

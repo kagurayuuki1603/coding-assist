@@ -18,6 +18,8 @@ class TaskIntent(str, Enum):
     ANSWER_QUESTION = "answer_question"
     FIND_BUGS = "find_bugs"
     GENERATE_TESTS = "generate_tests"
+    REFACTOR = "refactor"
+    UNSUPPORTED = "unsupported"
 
 SearchTerm = Annotated[
     str,
@@ -27,12 +29,35 @@ Target = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
 ]
+UserConstraint = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=300),
+]
 
 class TaskInterpretation(BaseModel):
     intent: TaskIntent
     target: Target | None = None
     search_terms: list[SearchTerm] = Field(min_length=1, max_length=5)
+    constraints: list[UserConstraint] = Field(default_factory=list, max_length=5)
 
+    def to_console_string(self) -> str:
+        search_terms = "\n".join(
+            f"- {term}" for term in self.search_terms
+        )
+        constraints = (
+            "\n".join(f"- {constraint}" for constraint in self.constraints)
+            if self.constraints
+            else "None"
+        )
+
+        return (
+            f"Intent: {self.intent.value}\n"
+            f"Target: {self.target or 'Not specified'}\n"
+            "Search Terms:\n"
+            f"{search_terms}\n"
+            "Constraints:\n"
+            f"{constraints}"
+        )
 
 
 

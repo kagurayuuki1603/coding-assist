@@ -1,6 +1,31 @@
 import unittest
 
-from cd_assist.prompts import TEST_PATCH_INSTRUCTIONS, TEST_PROPOSAL_INSTRUCTIONS
+from cd_assist.prompts import (
+    INTERPRETATION_INSTRUCTIONS,
+    TEST_PATCH_INSTRUCTIONS,
+    TEST_PROPOSAL_INSTRUCTIONS,
+)
+
+
+class InterpretationInstructionsTests(unittest.TestCase):
+    def test_defines_refactor_intent_and_behavior_preserving_examples(self):
+        for requirement in (
+            'use "refactor"',
+            "Refactor calculateTotal in OrderService.java",
+            "Extract validation logic from UserService",
+            "without changing behavior",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, INTERPRETATION_INSTRUCTIONS)
+
+    def test_distinguishes_feature_changes_from_refactors(self):
+        for behavior_change in (
+            "Change RetryPolicy to allow five attempts",
+            "Add caching to UserService",
+            "Remove null validation",
+        ):
+            with self.subTest(behavior_change=behavior_change):
+                self.assertIn(behavior_change, INTERPRETATION_INSTRUCTIONS)
 
 
 class TestProposalInstructionsTests(unittest.TestCase):

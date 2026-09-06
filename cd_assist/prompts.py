@@ -34,17 +34,39 @@ Interpret the user's repository task.
 Return:
 - intent: "answer_question" when the user asks how code works or where
   behavior is implemented; use "find_bugs" when the user asks to identify
-  defects; use "generate_tests" when the user asks to generate tests
+  defects; use "generate_tests" when the user asks to generate tests;
+  use "refactor" when the user asks to refactor code for 1 class or method;
+  use "unsupported" when a refactor request targets multiple classes, a module,
+  the entire repository, or does not identify a single class or method,
+  or does not satisfy any of the above intents. 
 - target: the Java filename or relative file path explicitly mentioned by
   the user; otherwise null. Do not invent a target.
 - search_terms: 1 to 5 concise terms useful for repository search. Include
   an explicitly mentioned filename, class, method, or domain concept.
   Exclude conversational filler and generic words such as "find", "code",
   "question", and "please".
+- constraints: zero to five explicit restrictions stated by the user.
+  Preserve their meaning without inventing additional requirements.
+  Return an empty list when no constraint is stated.
 
 Do not answer the user's question.
 Do not inspect the repository or claim that a file exists.
 Base the interpretation only on the user's request.
+
+Below are some examples of refactoring:
+- Refactor calculateTotal in OrderService.java
+- Extract validation logic from UserService
+- Simplify RetryPolicy.shouldRetry without changing behavior
+
+Below are some examples of refactoring that is unsupported due to scope: 
+- "Refactor every service class"
+- "Refactor the entire repository"
+
+which are different from the below that are similar to feature enhancements:
+- Change RetryPolicy to allow five attempts
+- Add caching to UserService
+- Remove null validation
+Classify feature enhancements as "unsupported"
 """
 
 

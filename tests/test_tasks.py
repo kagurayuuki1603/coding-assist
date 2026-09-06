@@ -51,10 +51,37 @@ class TaskInterpretationTests(unittest.TestCase):
             interpretation.target,
         )
 
+    def test_accepts_refactor_intent_with_known_java_target(self):
+        interpretation = TaskInterpretation(
+            intent=TaskIntent.REFACTOR,
+            target="src/main/java/com/example/OrderService.java",
+            search_terms=["OrderService.java", "calculateTotal"],
+        )
+
+        self.assertEqual(TaskIntent.REFACTOR, interpretation.intent)
+        self.assertEqual(
+            "src/main/java/com/example/OrderService.java",
+            interpretation.target,
+        )
+        self.assertEqual(
+            ["OrderService.java", "calculateTotal"],
+            interpretation.search_terms,
+        )
+
+    def test_accepts_refactor_intent_without_known_target(self):
+        interpretation = TaskInterpretation(
+            intent="refactor",
+            target=None,
+            search_terms=["validation logic", "UserService"],
+        )
+
+        self.assertEqual(TaskIntent.REFACTOR, interpretation.intent)
+        self.assertIsNone(interpretation.target)
+
     def test_rejects_unsupported_intent(self):
         with self.assertRaises(ValidationError):
             TaskInterpretation(
-                intent="refactor",
+                intent="delete_repository",
                 search_terms=["UserService"],
             )
 

@@ -1228,6 +1228,27 @@ class InterpretIntentionTests(unittest.TestCase):
         self.assertIsNone(result.target)
         self.assertEqual(["user validation"], result.search_terms)
 
+    def test_returns_structured_refactor_interpretation_without_repository_tools(self):
+        interpretation = TaskInterpretation(
+            intent=TaskIntent.REFACTOR,
+            target="OrderService.java",
+            search_terms=["OrderService.java", "calculateTotal"],
+        )
+        client = Mock()
+        client.responses.parse.return_value = SimpleNamespace(
+            output_parsed=interpretation
+        )
+
+        result = interpret_intention(
+            client,
+            "Refactor calculateTotal in OrderService.java",
+        )
+
+        self.assertIs(interpretation, result)
+        self.assertEqual(TaskIntent.REFACTOR, result.intent)
+        self.assertEqual("OrderService.java", result.target)
+        client.responses.parse.assert_called_once()
+
     def test_raises_when_parsed_interpretation_is_missing(self):
         client = Mock()
         client.responses.parse.return_value = SimpleNamespace(output_parsed=None)

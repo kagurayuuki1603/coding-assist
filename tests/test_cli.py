@@ -133,6 +133,30 @@ class HandleInterpretCommandTests(unittest.TestCase):
         print_interpretation.assert_called_once_with(interpretation)
 
     @patch("cd_assist.cli.print_interpretation")
+    def test_prints_refactor_interpretation_without_retrieval(
+        self,
+        print_interpretation,
+    ):
+        interpretation = TaskInterpretation(
+            intent=TaskIntent.REFACTOR,
+            target="OrderService.java",
+            search_terms=["OrderService.java", "calculateTotal"],
+        )
+        agent = Mock()
+        agent.interpret_task.return_value = interpretation
+
+        handle_interpret_command(
+            "interpret Refactor calculateTotal in OrderService.java",
+            agent,
+        )
+
+        agent.interpret_task.assert_called_once_with(
+            "Refactor calculateTotal in OrderService.java"
+        )
+        agent.retrieve_tool.assert_not_called()
+        print_interpretation.assert_called_once_with(interpretation)
+
+    @patch("cd_assist.cli.print_interpretation")
     @patch("cd_assist.cli.print_exception")
     def test_reports_model_error(self, print_exception, print_interpretation):
         agent = Mock()
